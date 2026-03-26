@@ -403,6 +403,7 @@ function initGlobe() {
             uBump:     { value: bumpTex  ?? dayTex },
             uCloud:    { value: cloudTex ?? dayTex },
             uCloudOffset: { value: 0.0 },
+            uCloudFade:   { value: 1.0 },   // 1 = full clouds, 0 = invisible
             uSunDir:   { value: sunDir },
             uHasNight: { value: nightTex ? 1.0 : 0.0 },
             uHasWater: { value: waterTex ? 1.0 : 0.0 },
@@ -422,7 +423,7 @@ function initGlobe() {
           `,
           fragmentShader: /* glsl */`
             uniform sampler2D uDay, uNight, uWater, uBump, uCloud;
-            uniform float uCloudOffset, uHasNight, uHasWater, uHasBump, uHasCloud;
+            uniform float uCloudOffset, uCloudFade, uHasNight, uHasWater, uHasBump, uHasCloud;
             uniform vec3  uSunDir;
             varying vec2 vUv;
             varying vec3 vNormal;
@@ -474,12 +475,12 @@ function initGlobe() {
                 color += water * (spec * 0.75 + specSoft) * vec3(1.0, 0.96, 0.90);
               }
 
-              // Clouds — more opaque with shadow on day side
-              if (uHasCloud > 0.5) {
+              // Clouds — fade out on zoom (uCloudFade 0→1)
+              if (uHasCloud > 0.5 && uCloudFade > 0.01) {
                 vec2  cUv   = vec2(vUv.x + uCloudOffset, vUv.y);
-                float cloud = texture2D(uCloud, cUv).r;
+                float cloud = texture2D(uCloud, cUv).r * uCloudFade;
                 float cLit  = max(dot(N, L), 0.0) * 0.7 + 0.3;
-                float cShadow = 1.0 - cloud * 0.35;   // clouds cast subtle shadow
+                float cShadow = 1.0 - cloud * 0.35;
                 color *= mix(1.0, cShadow, dayMix);
                 color  = mix(color, vec3(cLit), cloud * 0.82);
               }
@@ -571,6 +572,11 @@ function initGlobe() {
           requestAnimationFrame(tick);
           cloudOffset += 0.000025;
           earthMat.uniforms.uCloudOffset.value = cloudOffset;
+          // Fade clouds based on camera altitude: full at alt≥0.4, gone at alt≤0.05
+          const alt = globe?.pointOfView?.()?.altitude ?? 1.0;
+          earthMat.uniforms.uCloudFade.value = Math.max(0, Math.min(1,
+            (alt - 0.05) / (0.4 - 0.05)
+          ));
         };
         tick();
         setInterval(updateSun, 60_000); // update sun position every minute
