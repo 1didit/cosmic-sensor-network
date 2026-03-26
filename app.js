@@ -132,12 +132,13 @@ let xrChart   = null;
 let schmChart = null;
 let pfChart   = null;   // particle flux (log scale)
 
-// Globe ring state — earthquakes only
-let eqRings  = [];
+// Globe ring state — earthquakes + Schumann EM rings
+let eqRings   = [];
+let schmRings = [];
 
-// Globe arc state — CME arcs + Schumann bracket arcs (merged)
+// Globe arc state — CME arcs only (Schumann moved to rings)
 let cmeArcs  = [];
-let schmArcs = [];
+let schmArcs = [];  // kept for legacy syncArcs compat, always empty
 
 // Globe point state
 let eqPoints = [];   // earthquake epicenter dots
@@ -357,13 +358,15 @@ function initGlobe() {
       const RADIUS = globeMesh.geometry.parameters?.radius ?? 100;
       const tl     = new THREE.TextureLoader();
       const CDN    = '//unpkg.com/three-globe/example/img/';
+      // jsDelivr is more reliable for clouds (unpkg sometimes blocks large PNGs)
+      const CDN2   = 'https://cdn.jsdelivr.net/npm/three-globe/example/img/';
 
       Promise.allSettled([
-        tl.loadAsync(CDN + 'earth-blue-marble.jpg'),
-        tl.loadAsync(CDN + 'earth-night.jpg'),
-        tl.loadAsync(CDN + 'earth-water.png'),
-        tl.loadAsync(CDN + 'earth-topology.png'),
-        tl.loadAsync(CDN + 'earth-clouds.png'),
+        tl.loadAsync(CDN  + 'earth-blue-marble.jpg'),
+        tl.loadAsync(CDN  + 'earth-night.jpg'),
+        tl.loadAsync(CDN  + 'earth-water.png'),
+        tl.loadAsync(CDN  + 'earth-topology.png'),
+        tl.loadAsync(CDN2 + 'earth-clouds.png'),
       ]).then(([r0, r1, r2, r3, r4]) => {
         const ok = r => r.status === 'fulfilled' ? r.value : null;
         const dayTex   = ok(r0);
@@ -473,23 +476,54 @@ function initGlobe() {
 
         globeMesh.material = earthMat;
 
-        // ── Atmosphere sphere ─────────────────────────
-        const atmGeo = new THREE.SphereGeometry(RADIUS * 1.028, 64, 32);
-        const atmMat = new THREE.ShaderMaterial({
-          transparent: true,
-          side:        THREE.FrontSide,
-          depthWrite:  false,
-          blending:    THREE.AdditiveBlending,
+        // ── Atmosphere sphere (inner — tight blue rim) ────
+        const atmFrag = /* glsl */`
+          uniform vec3 uSunDir;
+          varying vec3 vNormal;
+          varying vec3 vViewPos;
+          void main() {
+            vec3  N    = normalize(vNormal);
+            vec3  V    = normalize(-vViewPos);
+            float rim  = 1.0 - max(dot(N, V), 0.0);
+            rim         = pow(rim, 2.2);
+            float day   = max(dot(N, normalize(uSunDir)) * 0.5 + 0.62, 0.0);
+            // Terminator tint: night side gets a warmer orange limb
+            float night = max(-dot(N, normalize(uSunDir)) * 0.4 + 0.1, 0.0);
+            vec3  dayCol   = vec3(0.18, 0.50, 1.00);
+            vec3  nightCol = vec3(0.45, 0.18, 0.08);
+            vec3  col = mix(nightCol * night, dayCol * day, smoothstep(0.0, 0.5, day));
+            float a   = rim * 0.88;
+            gl_FragColor = vec4(col * a, a);
+          }
+        `;
+        const atmVert = /* glsl */`
+          varying vec3 vNormal;
+          varying vec3 vViewPos;
+          void main() {
+            vNormal  = normalize(normalMatrix * normal);
+            vViewPos = (modelViewMatrix * vec4(position, 1.0)).xyz;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `;
+        const makeAtmMat = (uni) => new THREE.ShaderMaterial({
+          transparent: true, side: THREE.FrontSide,
+          depthWrite: false, blending: THREE.AdditiveBlending,
+          uniforms: uni, vertexShader: atmVert, fragmentShader: atmFrag,
+        });
+
+        // Inner atmosphere (tight rim)
+        const atmMesh = new THREE.Mesh(
+          new THREE.SphereGeometry(RADIUS * 1.030, 64, 32),
+          makeAtmMat({ uSunDir: { value: sunDir } })
+        );
+        globeMesh.parent.add(atmMesh);
+
+        // Outer diffuse glow (deep-space aurora look)
+        const outerMat = new THREE.ShaderMaterial({
+          transparent: true, side: THREE.FrontSide,
+          depthWrite: false, blending: THREE.AdditiveBlending,
           uniforms: { uSunDir: { value: sunDir } },
-          vertexShader: /* glsl */`
-            varying vec3 vNormal;
-            varying vec3 vViewPos;
-            void main() {
-              vNormal  = normalize(normalMatrix * normal);
-              vViewPos = (modelViewMatrix * vec4(position, 1.0)).xyz;
-              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-            }
-          `,
+          vertexShader: atmVert,
           fragmentShader: /* glsl */`
             uniform vec3 uSunDir;
             varying vec3 vNormal;
@@ -498,16 +532,19 @@ function initGlobe() {
               vec3  N   = normalize(vNormal);
               vec3  V   = normalize(-vViewPos);
               float rim = 1.0 - max(dot(N, V), 0.0);
-              rim        = pow(rim, 2.8);
-              float day  = max(dot(N, normalize(uSunDir)) * 0.5 + 0.6, 0.0);
-              vec3  col  = vec3(0.22, 0.52, 1.0);
-              float a    = rim * 0.72 * day;
+              rim        = pow(rim, 1.5);
+              float day  = max(dot(N, normalize(uSunDir)) * 0.4 + 0.55, 0.0);
+              vec3  col  = vec3(0.08, 0.28, 0.85);
+              float a    = rim * 0.22 * day;
               gl_FragColor = vec4(col * a, a);
             }
           `,
         });
-        const atmMesh = new THREE.Mesh(atmGeo, atmMat);
-        globeMesh.parent.add(atmMesh);
+        const outerMesh = new THREE.Mesh(
+          new THREE.SphereGeometry(RADIUS * 1.065, 48, 24),
+          outerMat
+        );
+        globeMesh.parent.add(outerMesh);
 
         // ── Animate: clouds + sun ─────────────────────
         let cloudOffset = 0;
@@ -547,16 +584,16 @@ function initGlobe() {
   }, 2500);
 }
 
-/** EQ rings only */
+/** EQ rings + Schumann EM rings */
 function syncRings() {
   if (!globe) return;
-  globe.ringsData(eqRings);
+  globe.ringsData([...eqRings, ...schmRings]);
 }
 
-/** CME arcs + Schumann spike arcs → arcsData */
+/** CME arcs only */
 function syncArcs() {
   if (!globe) return;
-  globe.arcsData([...cmeArcs, ...schmArcs]);
+  globe.arcsData(cmeArcs);
 }
 
 /** EQ epicenter dots + subsolar orb → pointsData */
@@ -596,38 +633,25 @@ const SCHM_SOURCES = [
 ];
 
 /**
- * "Splat" marker at 3 Schumann source regions.
- * 6 solid spikes radiating from center (alternating long/short) → starburst shape.
- * Visually distinct from:
- *   • EQ rings (expand outward, circular)
- *   • CME arcs (long dashed cross-globe lines, amber→red gradient)
- *   • EQ dots (tiny static points)
- * Schumann: solid radial spikes, EM-state color, animated by activity.
+ * Schumann resonance EM-wave rings at 3 source regions.
+ * Replaced starburst arcs with 3 concentric expanding rings per source —
+ * visually represent standing EM waves (SR cavity modes).
+ * Ring size/speed scale with activity state.
  */
 function updateSchmGlobe(state, col) {
   if (!globe) return;
-  const spd    = state === 'SPIKE' ? 500 : state === 'ACTIVE' ? 1400 : 3500;
-  schmArcs = SCHM_SOURCES.flatMap(s => {
-    const latRad = s.lat * Math.PI / 180;
-    const arcs   = [];
-    for (let i = 0; i < 6; i++) {
-      const angle  = (i * 60) * Math.PI / 180;
-      const R      = i % 2 === 0 ? 3.8 : 2.2;   // long / short alternating → irregular splat
-      const elat   = s.lat + R * Math.cos(angle);
-      const elng   = s.lng + R * Math.sin(angle) / Math.cos(latRad);
-      arcs.push({
-        slat: s.lat, slng: s.lng,
-        elat, elng,
-        color: col,
-        w: 1.0,
-        t: spd,
-        dashLen: 1,   // solid line — CME arcs use dashLen=0.35
-        dashGap: 0,
-      });
-    }
-    return arcs;
-  });
-  syncArcs();
+  const rgb = hexToRgb(col);
+  // Propagation speed: faster = more active (inverse of globe ring spd units)
+  const spd  = state === 'SPIKE' ? 0.28 : state === 'ACTIVE' ? 0.55 : 1.1;
+  const rep  = state === 'SPIKE' ? 900  : state === 'ACTIVE' ? 2200  : 5000;
+
+  schmRings = SCHM_SOURCES.flatMap(s => [
+    // 3 concentric rings with staggered repeat periods → EM mode harmonics
+    { lat: s.lat, lng: s.lng, rgb, r: 2.8, spd,            rep: rep * 0.60 },
+    { lat: s.lat, lng: s.lng, rgb, r: 5.5, spd: spd * 0.85, rep: rep * 1.00 },
+    { lat: s.lat, lng: s.lng, rgb, r: 9.0, spd: spd * 0.70, rep: rep * 1.55 },
+  ]);
+  syncRings();
 }
 
 /**
@@ -649,29 +673,34 @@ function updateGlobeEQ(features) {
     return {
       lat, lng,
       rgb: hexToRgb(col),
-      // Radius: small fast ↔ large slow
-      r:   big ? Math.max(2.5, mag * 1.4)
-               : med ? Math.max(1.2, mag * 0.85)
-               :       Math.max(0.5, mag * 0.55),
-      // Speed: big quakes expand slowly (more dramatic), small = rapid flicker
-      spd: big ? 0.22 + hashFloat(id, 1) * 0.15
-               : med  ? 0.55 + hashFloat(id, 1) * 0.35
-               :        1.0  + hashFloat(id, 1) * 0.8,
-      // Repeat: big = one slow ring, small = rapid succession
-      rep: big ? 3200 + hashFloat(id, 2) * 1500
-               : med  ? 1200 + hashFloat(id, 2) * 600
-               :        550  + hashFloat(id, 2) * 350,
+      // Radius: M5.5+ dramatically large, others scale linearly
+      r:   big ? Math.max(4.0, mag * 1.8)
+               : med ? Math.max(1.5, mag * 1.0)
+               :       Math.max(0.6, mag * 0.60),
+      // Speed: big quakes expand very slowly for dramatic effect
+      spd: big ? 0.14 + hashFloat(id, 1) * 0.10
+               : med  ? 0.45 + hashFloat(id, 1) * 0.30
+               :        0.9  + hashFloat(id, 1) * 0.7,
+      // Repeat: big = rare single slow ring, small = rapid flicker
+      rep: big ? 4500 + hashFloat(id, 2) * 2000
+               : med  ? 1400 + hashFloat(id, 2) * 700
+               :        600  + hashFloat(id, 2) * 380,
     };
   });
   eqRings = rings;
   syncRings();
 
-  // Glowing epicenter dots — radius scales with magnitude
+  // Glowing epicenter dots — elevated altitude for glow effect, radius by magnitude
   eqPoints = features.map(f => {
     const [lng, lat, depth] = f.geometry.coordinates;
     const mag = f.properties.mag ?? 3.5;
     const col = depth < 70 ? C.red : depth < 300 ? C.amber : C.blue;
-    return { lat, lng, col, r: Math.max(0.08, (mag - 3.0) * 0.11) };
+    const big = mag >= 5.5;
+    return {
+      lat, lng, col,
+      r:   Math.max(0.10, (mag - 3.0) * (big ? 0.18 : 0.13)),
+      alt: big ? 0.012 : 0.005,  // bigger quakes elevated = more visible glow
+    };
   });
   syncPoints();
 
