@@ -340,6 +340,7 @@ function initGlobe() {
     ctrl.autoRotateSpeed = 0.28;
     ctrl.enableDamping   = true;
     ctrl.dampingFactor   = 0.08;
+    ctrl.minDistance     = 101.5;   // allows zoom to ~city level (altitude ≈ 0.015)
   }, 150);
 
   // ── Retina ────────────────────────────────────────────
@@ -510,7 +511,7 @@ function initGlobe() {
             vec3  dayCol   = vec3(0.18, 0.50, 1.00);
             vec3  nightCol = vec3(0.45, 0.18, 0.08);
             vec3  col = mix(nightCol * night, dayCol * day, smoothstep(0.0, 0.5, day));
-            float a   = rim * 0.88;
+            float a   = rim * 0.42;
             gl_FragColor = vec4(col * a, a);
           }
         `;
@@ -553,7 +554,7 @@ function initGlobe() {
               rim        = pow(rim, 1.5);
               float day  = max(dot(N, normalize(uSunDir)) * 0.4 + 0.55, 0.0);
               vec3  col  = vec3(0.08, 0.28, 0.85);
-              float a    = rim * 0.22 * day;
+              float a    = rim * 0.10 * day;
               gl_FragColor = vec4(col * a, a);
             }
           `,
