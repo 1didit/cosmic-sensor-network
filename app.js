@@ -132,13 +132,15 @@ let xrChart   = null;
 let schmChart = null;
 let pfChart   = null;   // particle flux (log scale)
 
-// Globe ring state — earthquakes + Schumann EM rings
-let eqRings   = [];
-let schmRings = [];
+// Globe ring state — earthquakes only
+let eqRings  = [];
 
-// Globe arc state — CME arcs only (Schumann moved to rings)
+// Globe arc state — CME arcs only
 let cmeArcs  = [];
-let schmArcs = [];  // kept for legacy syncArcs compat, always empty
+let schmArcs = [];  // unused, kept for compat
+
+// Schumann HTML elements (distinct visual from EQ rings)
+let schmHtmlData = [];
 
 // Globe point state
 let eqPoints = [];   // earthquake epicenter dots
@@ -268,8 +270,8 @@ function initGlobe() {
   // sizeGlobe() is called after layout paints (see timeouts below).
   globe = Globe()
     // ── Textures (minimal — custom shader takes over) ──
-    .globeImageUrl('//unpkg.com/three-globe/example/img/earth-blue-marble.jpg')
-    .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
+    .globeImageUrl('https://raw.githubusercontent.com/turban/webgl-earth/master/images/2_no_clouds_4k.jpg')
+    .bumpImageUrl('https://raw.githubusercontent.com/turban/webgl-earth/master/images/elev_bump_4k.jpg')
     .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
     .backgroundColor('#080808')
     // ── Atmosphere disabled — shader has its own ────
@@ -312,6 +314,12 @@ function initGlobe() {
     .labelDotRadius(0)
     .labelColor(() => 'rgba(255,220,180,0.85)')
     .labelResolution(3)
+    // ── Schumann HTML markers ─────────────────────────
+    .htmlElementsData([])
+    .htmlElement(d => d.el)
+    .htmlLat(d => d.lat)
+    .htmlLng(d => d.lng)
+    .htmlAltitude(0.01)
     (el);                              // ← mount to DOM element
 
   // ── Size correction ─────────────────────────────────
@@ -357,16 +365,16 @@ function initGlobe() {
 
       const RADIUS = globeMesh.geometry.parameters?.radius ?? 100;
       const tl     = new THREE.TextureLoader();
-      const CDN    = '//unpkg.com/three-globe/example/img/';
-      // jsDelivr is more reliable for clouds (unpkg sometimes blocks large PNGs)
-      const CDN2   = 'https://cdn.jsdelivr.net/npm/three-globe/example/img/';
+      // 4K textures from turban/webgl-earth (raw.githubusercontent = CORS OK)
+      // Clouds: matteason live cloud map (updates every 3h, CORS enabled)
+      const GH  = 'https://raw.githubusercontent.com/turban/webgl-earth/master/images/';
 
       Promise.allSettled([
-        tl.loadAsync(CDN  + 'earth-blue-marble.jpg'),
-        tl.loadAsync(CDN  + 'earth-night.jpg'),
-        tl.loadAsync(CDN  + 'earth-water.png'),
-        tl.loadAsync(CDN  + 'earth-topology.png'),
-        tl.loadAsync(CDN2 + 'earth-clouds.png'),
+        tl.loadAsync(GH + '2_no_clouds_4k.jpg'),           // day — clean surface, no baked clouds
+        tl.loadAsync('https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-night.jpg'),
+        tl.loadAsync(GH + 'water_4k.png'),                 // specular ocean mask
+        tl.loadAsync(GH + 'elev_bump_4k.jpg'),             // 4K elevation bump
+        tl.loadAsync('https://clouds.matteason.co.uk/images/4096x2048/clouds.jpg'), // live clouds
       ]).then(([r0, r1, r2, r3, r4]) => {
         const ok = r => r.status === 'fulfilled' ? r.value : null;
         const dayTex   = ok(r0);
@@ -424,50 +432,60 @@ function initGlobe() {
               vec3 V = normalize(-vViewPos);
               vec3 L = normalize(uSunDir);
 
-              // Screen-space bump (only when bump texture loaded)
+              // Enhanced screen-space bump mapping
               vec3 bN = N;
               if (uHasBump > 0.5) {
-                vec2 px  = vec2(dFdx(vUv.x), dFdy(vUv.y)) * 0.5;
+                vec2 px  = vec2(dFdx(vUv.x), dFdy(vUv.y));
                 float b0 = texture2D(uBump, vUv).r;
                 float bx = texture2D(uBump, vUv + vec2(px.x, 0.0)).r;
                 float by = texture2D(uBump, vUv + vec2(0.0, px.y)).r;
+                // Stronger bump strength (2.8 vs 1.4) for visible terrain relief
                 bN = normalize(N
-                  + 1.4 * (bx - b0) * normalize(cross(N, vec3(0.0, 1.0, 0.01)))
-                  + 1.4 * (by - b0) * normalize(cross(N, vec3(1.0, 0.0, 0.0))));
+                  + 2.8 * (bx - b0) * normalize(cross(N, vec3(0.0, 1.0, 0.01)))
+                  + 2.8 * (by - b0) * normalize(cross(N, vec3(1.0, 0.0, 0.0))));
               }
 
               float diff   = dot(bN, L);
-              float dayMix = smoothstep(-0.12, 0.28, diff);
+              float rawDiff = dot(N, L);
+              float dayMix = smoothstep(-0.15, 0.25, diff);
 
+              // Day: slight contrast boost and cool-tint correction
               vec3 day = texture2D(uDay, vUv).rgb;
-              day      = day * (0.06 + 0.94 * max(diff, 0.0));
+              day = pow(day, vec3(0.92));              // gamma lift for vibrancy
+              day = day * (0.05 + 0.95 * max(diff, 0.0));
 
               vec3 color = day;
               if (uHasNight > 0.5) {
                 vec3 night = texture2D(uNight, vUv).rgb;
-                night      = night * 2.0 * (1.0 - smoothstep(-0.25, 0.12, diff));
-                color      = mix(night, day, dayMix);
+                // Boost city lights, subtle bloom
+                night = night * night * 3.8;
+                night *= (1.0 - smoothstep(-0.28, 0.10, rawDiff));
+                color  = mix(night, day, dayMix);
               }
 
-              // Specular ocean
+              // Specular ocean — tighter, brighter highlight
               if (uHasWater > 0.5) {
                 float water = texture2D(uWater, vUv).r;
                 vec3  H     = normalize(L + V);
-                float spec  = pow(max(dot(bN, H), 0.0), 90.0) * max(diff, 0.0);
-                color += water * spec * 0.55 * vec3(1.0, 0.97, 0.93);
+                float spec  = pow(max(dot(bN, H), 0.0), 140.0) * max(diff, 0.0);
+                // Wide soft glare + tight hot spot
+                float specSoft = pow(max(dot(bN, H), 0.0), 30.0) * max(diff, 0.0) * 0.08;
+                color += water * (spec * 0.75 + specSoft) * vec3(1.0, 0.96, 0.90);
               }
 
-              // Clouds
+              // Clouds — more opaque with shadow on day side
               if (uHasCloud > 0.5) {
                 vec2  cUv   = vec2(vUv.x + uCloudOffset, vUv.y);
                 float cloud = texture2D(uCloud, cUv).r;
-                float cLit  = max(dot(N, L), 0.0) * 0.6 + 0.4;
-                color = mix(color, vec3(cLit * (0.4 + 0.6 * dayMix)), cloud * 0.72);
+                float cLit  = max(dot(N, L), 0.0) * 0.7 + 0.3;
+                float cShadow = 1.0 - cloud * 0.35;   // clouds cast subtle shadow
+                color *= mix(1.0, cShadow, dayMix);
+                color  = mix(color, vec3(cLit), cloud * 0.82);
               }
 
-              // Fresnel atmosphere hint
-              float rim = pow(1.0 - max(dot(N, V), 0.0), 4.5);
-              color += rim * 0.07 * vec3(0.35, 0.65, 1.0) * max(diff * 0.5 + 0.5, 0.0);
+              // Fresnel rim — subtle blue hint from atmosphere shader
+              float rim = pow(1.0 - max(dot(N, V), 0.0), 4.0);
+              color += rim * 0.055 * vec3(0.30, 0.60, 1.0) * max(rawDiff * 0.5 + 0.5, 0.0);
 
               gl_FragColor = vec4(color, 1.0);
             }
@@ -584,16 +602,22 @@ function initGlobe() {
   }, 2500);
 }
 
-/** EQ rings + Schumann EM rings */
+/** EQ rings only */
 function syncRings() {
   if (!globe) return;
-  globe.ringsData([...eqRings, ...schmRings]);
+  globe.ringsData(eqRings);
 }
 
 /** CME arcs only */
 function syncArcs() {
   if (!globe) return;
   globe.arcsData(cmeArcs);
+}
+
+/** Schumann HTML markers */
+function syncSchmHtml() {
+  if (!globe) return;
+  globe.htmlElementsData(schmHtmlData);
 }
 
 /** EQ epicenter dots + subsolar orb → pointsData */
@@ -633,25 +657,37 @@ const SCHM_SOURCES = [
 ];
 
 /**
- * Schumann resonance EM-wave rings at 3 source regions.
- * Replaced starburst arcs with 3 concentric expanding rings per source —
- * visually represent standing EM waves (SR cavity modes).
- * Ring size/speed scale with activity state.
+ * Schumann resonance markers — custom SVG HTML elements at 3 source regions.
+ * Diamond/crosshair shape with CSS pulse — visually distinct from EQ rings
+ * (which are circular expanding waves on the ring layer).
  */
 function updateSchmGlobe(state, col) {
   if (!globe) return;
-  const rgb = hexToRgb(col);
-  // Propagation speed: faster = more active (inverse of globe ring spd units)
-  const spd  = state === 'SPIKE' ? 0.28 : state === 'ACTIVE' ? 0.55 : 1.1;
-  const rep  = state === 'SPIKE' ? 900  : state === 'ACTIVE' ? 2200  : 5000;
 
-  schmRings = SCHM_SOURCES.flatMap(s => [
-    // 3 concentric rings with staggered repeat periods → EM mode harmonics
-    { lat: s.lat, lng: s.lng, rgb, r: 2.8, spd,            rep: rep * 0.60 },
-    { lat: s.lat, lng: s.lng, rgb, r: 5.5, spd: spd * 0.85, rep: rep * 1.00 },
-    { lat: s.lat, lng: s.lng, rgb, r: 9.0, spd: spd * 0.70, rep: rep * 1.55 },
-  ]);
-  syncRings();
+  const dur  = state === 'SPIKE' ? '0.65s' : state === 'ACTIVE' ? '1.5s' : '3.0s';
+  const sz   = 26;
+  const half = sz / 2;
+
+  schmHtmlData = SCHM_SOURCES.map(s => {
+    const el = document.createElement('div');
+    el.style.cssText = `width:${sz}px;height:${sz}px;pointer-events:none`;
+    el.innerHTML = `<svg width="${sz}" height="${sz}" viewBox="0 0 ${sz} ${sz}"
+      style="display:block;animation:schm-pulse ${dur} ease-in-out infinite"
+      xmlns="http://www.w3.org/2000/svg">
+      <style>@keyframes schm-pulse{0%,100%{opacity:.9;transform:scale(1)}50%{opacity:.4;transform:scale(1.2)}}</style>
+      <polygon points="${half},2 ${sz-2},${half} ${half},${sz-2} 2,${half}"
+        fill="none" stroke="${col}" stroke-width="1.4" opacity="0.9"/>
+      <line x1="${half}" y1="${half-5}" x2="${half}" y2="${half+5}"
+        stroke="${col}" stroke-width="0.9" opacity="0.65"/>
+      <line x1="${half-5}" y1="${half}" x2="${half+5}" y2="${half}"
+        stroke="${col}" stroke-width="0.9" opacity="0.65"/>
+      <circle cx="${half}" cy="${half}" r="2" fill="${col}" opacity="1"/>
+      <circle cx="${half}" cy="${half}" r="${half-2}" fill="none"
+        stroke="${col}" stroke-width="0.5" opacity="0.22" stroke-dasharray="2 4"/>
+    </svg>`;
+    return { lat: s.lat, lng: s.lng, el };
+  });
+  syncSchmHtml();
 }
 
 /**
