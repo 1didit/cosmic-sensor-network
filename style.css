@@ -8,14 +8,14 @@
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
-  --bg:       #050810;
-  --surf:     #090e1a;
-  --surf2:    #0c1424;
-  --border:   #15203a;
-  --border2:  #1e2f50;
-  --text:     #b0c4d8;
-  --dim:      #48607a;
-  --bright:   #ddeeff;
+  --bg:       #080808;
+  --surf:     #0f0f0f;
+  --surf2:    #161616;
+  --border:   #242424;
+  --border2:  #303030;
+  --text:     #a8a8a8;
+  --dim:      #555555;
+  --bright:   #e8e8e8;
 
   --teal:     #00f5c4;
   --amber:    #f5a623;
@@ -42,10 +42,11 @@ html, body {
   position: fixed;
   top: 0; left: 0; right: 0;
   height: var(--bar-h);
-  background: rgba(5, 8, 16, .96);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border-bottom: 1px solid var(--border);
+  background: rgba(8, 8, 8, 0.80);
+  backdrop-filter: blur(28px) saturate(140%);
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.03), 0 4px 24px rgba(0,0,0,0.7);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -202,22 +203,24 @@ html, body {
   width: var(--sidebar-w);
   flex-shrink: 0;
   height: 100%;
-  background: var(--surf);
-  border-left: 1px solid var(--border);
+  background: rgba(10, 10, 10, 0.92);
+  backdrop-filter: blur(20px) saturate(120%);
+  -webkit-backdrop-filter: blur(20px) saturate(120%);
+  border-left: 1px solid rgba(255,255,255,0.05);
   overflow-y: auto;
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
   scrollbar-width: thin;
-  scrollbar-color: var(--border2) transparent;
+  scrollbar-color: rgba(255,255,255,0.08) transparent;
 }
 #sidebar::-webkit-scrollbar { width: 3px; }
-#sidebar::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+#sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
 
 /* ── DATA BLOCKS ──────────────────────────────────── */
 .block {
-  padding: 13px 15px;
-  border-bottom: 1px solid var(--border);
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
   flex-shrink: 0;
 }
 
@@ -256,11 +259,16 @@ html, body {
 
 .metric {
   flex: 1;
-  background: var(--surf2);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 8px 10px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 9px;
+  padding: 9px 11px;
   min-width: 0;
+  transition: border-color 160ms ease-out, background 160ms ease-out;
+}
+.metric:hover {
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(255,255,255,0.12);
 }
 
 .mlabel {
@@ -460,16 +468,16 @@ html, body {
 .pchip {
   display: flex;
   align-items: center;
-  gap: 3px;
-  padding: 2px 7px 2px 5px;
-  border-radius: 3px;
-  border: 1px solid var(--border2);
-  background: transparent;
+  gap: 4px;
+  padding: 3px 8px 3px 6px;
+  border-radius: 100px;
+  border: 1px solid rgba(255,255,255,0.07);
+  background: rgba(255,255,255,0.02);
   color: var(--dim);
   font: 700 8px/1 var(--font);
   letter-spacing: 1px;
   cursor: pointer;
-  transition: color .2s, border-color .2s, background .2s;
+  transition: color 160ms ease-out, border-color 160ms ease-out, background 160ms ease-out, transform 120ms ease-out;
   white-space: nowrap;
   user-select: none;
 }
@@ -480,23 +488,29 @@ html, body {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: var(--border2);
+  background: rgba(255,255,255,0.15);
   flex-shrink: 0;
-  transition: background .2s, box-shadow .2s;
+  transition: background 160ms ease-out, box-shadow 160ms ease-out;
 }
 
 .pchip.on {
-  border-color: rgba(0,245,196,.45);
+  border-color: rgba(0,245,196,0.35);
   color: var(--teal);
+  background: rgba(0,245,196,0.05);
 }
 
 .pchip.on::before {
   background: var(--teal);
-  box-shadow: 0 0 6px var(--teal);
+  box-shadow: 0 0 7px var(--teal);
 }
 
 .pchip:hover {
-  background: var(--surf2);
+  background: rgba(255,255,255,0.06);
+  border-color: rgba(255,255,255,0.14);
+}
+
+.pchip:active {
+  transform: scale(0.96);
 }
 
 .bar-sep {
@@ -1040,42 +1054,50 @@ html, body {
 /* ── Solar planet visibility controls ─────────────────── */
 #sol-controls {
   position: absolute;
-  top: 10px;
+  top: 12px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 6;
   display: flex;
   align-items: center;
-  gap: 3px;
-  background: rgba(4, 8, 16, 0.72);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  padding: 5px 9px;
-  border-radius: 20px;
-  border: 1px solid rgba(255,255,255,0.07);
+  gap: 2px;
+  background: rgba(10, 10, 10, 0.65);
+  backdrop-filter: blur(22px) saturate(120%);
+  -webkit-backdrop-filter: blur(22px) saturate(120%);
+  padding: 6px 10px;
+  border-radius: 100px;
+  border: 1px solid rgba(255,255,255,0.09);
+  box-shadow:
+    0 8px 32px rgba(0,0,0,0.48),
+    0 0 0 1px rgba(255,255,255,0.03),
+    inset 0 1px 0 rgba(255,255,255,0.07);
   pointer-events: auto;
   white-space: nowrap;
 }
 #sol-controls .sol-sep {
   width: 1px;
   height: 14px;
-  background: rgba(255,255,255,0.10);
-  margin: 0 3px;
+  background: rgba(255,255,255,0.09);
+  margin: 0 4px;
 }
 .sol-chip {
-  font: 600 8px var(--font);
-  letter-spacing: 0.06em;
-  padding: 3px 7px;
-  border-radius: 10px;
-  border: 1px solid;
+  font: 600 9px var(--font);
+  letter-spacing: 0.07em;
+  padding: 4px 9px;
+  border-radius: 100px;
+  border: 1px solid rgba(255,255,255,0.08);
   cursor: pointer;
-  background: transparent;
+  background: rgba(255,255,255,0.03);
   outline: none;
-  transition: opacity 0.18s, filter 0.18s, background 0.18s;
+  transition: opacity 160ms ease-out, filter 160ms ease-out, background 160ms ease-out, transform 120ms ease-out, box-shadow 160ms ease-out;
   line-height: 1;
 }
-.sol-chip:hover { background: rgba(255,255,255,0.06); }
+.sol-chip:hover {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.15);
+}
+.sol-chip:active { transform: scale(0.96); }
 .sol-chip.off {
   opacity: 0.22;
-  filter: grayscale(0.7);
+  filter: grayscale(0.75);
 }

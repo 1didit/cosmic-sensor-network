@@ -1,0 +1,59 @@
+# ═══════════════════════════════════════════════════
+#  COSMIC SENSOR NETWORK — .gitignore
+#  Personal data, API keys, OS/editor artifacts
+# ═══════════════════════════════════════════════════
+
+# ── API KEYS & LOCAL CONFIG ─────────────────────────
+config.js
+*.env
+.env
+.env.*
+*.secret
+secrets.*
+keys.*
+credentials.*
+
+# ── macOS ────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+
+# ── Windows ──────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ── Linux ────────────────────────────────────────────
+*~
+.fuse_hidden*
+.nfs*
+
+# ── Editors ──────────────────────────────────────────
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*.orig
+
+# ── Logs & Debug ─────────────────────────────────────
+*.log
+logs/
+npm-debug.log*
+
+# ── Node (if ever added) ──────────────────────────────
+node_modules/
+package-lock.json
+yarn.lock
+
+# ── Backups & Temp ───────────────────────────────────
+*.bak
+*.tmp
+*.temp
+*~

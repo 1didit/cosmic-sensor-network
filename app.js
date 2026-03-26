@@ -2,11 +2,14 @@
    COSMIC SENSOR NETWORK — Application Logic
    APIs: NOAA Solar Wind · NOAA Kp · USGS Geomag
          USGS Earthquakes · NASA DONKI
-   Globe: Globe.gl (unpkg CDN)
-   Charts: Chart.js 4.x (cdnjs CDN)
+   Globe: Globe.gl (npm)
+   Charts: Chart.js 4.x (npm)
    ═══════════════════════════════════════════════════ */
 
-'use strict';
+import Globe from 'globe.gl';
+import * as THREE from 'three';
+import { Chart, registerables } from 'chart.js';
+Chart.register(...registerables);
 
 // ── NASA API KEY ───────────────────────────────────────
 const NASA_KEY_STORE = 'csn_nasa_key';
@@ -104,6 +107,8 @@ function initNasaKeyUI() {
 }
 
 // ── CONSTANTS ─────────────────────────────────────────
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
 const C = {
   teal:  '#00f5c4',
   amber: '#f5a623',
@@ -197,12 +202,9 @@ function kpLabel(kp) {
 }
 
 /** Convert hex colour string "#rrggbb" → [R, G, B] */
-function hexRGB(h) {
-  return [
-    parseInt(h.slice(1, 3), 16),
-    parseInt(h.slice(3, 5), 16),
-    parseInt(h.slice(5, 7), 16),
-  ];
+function hexToRgb(h) {
+  const n = parseInt(h.replace('#', ''), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
 /** Human-readable time-ago string */
@@ -264,16 +266,15 @@ function initGlobe() {
   // getBoundingClientRect() may return 0 at DOMContentLoaded;
   // sizeGlobe() is called after layout paints (see timeouts below).
   globe = Globe()
-    // ── Textures ────────────────────────────────────
-    .globeImageUrl('//unpkg.com/three-globe/example/img/earth-night.jpg')
+    // ── Textures (minimal — custom shader takes over) ──
+    .globeImageUrl('//unpkg.com/three-globe/example/img/earth-blue-marble.jpg')
     .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
     .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
-    .backgroundColor('#050810')
-    // ── Atmosphere ──────────────────────────────────
-    .atmosphereColor(C.teal)
-    .atmosphereAltitude(0.32)
-    // ── Graticule grid (lat/lng lines) ──────────────
-    .showGraticules(true)
+    .backgroundColor('#080808')
+    // ── Atmosphere disabled — shader has its own ────
+    .atmosphereAltitude(0)
+    // ── No graticule grid ───────────────────────────
+    .showGraticules(false)
     // ── Earthquake rings ────────────────────────────
     .ringsData([])
     .ringLat(d => d.lat)
@@ -332,31 +333,195 @@ function initGlobe() {
     ctrl.dampingFactor   = 0.08;
   }, 150);
 
-  // ── Retina + material enhancement ────────────────────
-  // Run inside try/catch — never break the globe if an API doesn't exist
+  // ── Retina ────────────────────────────────────────────
   setTimeout(() => {
     try { globe.renderer().setPixelRatio(Math.min(window.devicePixelRatio, 2)); } catch (_) {}
   }, 200);
 
-  // Poll until bump texture is loaded, then boost bumpScale + specular
-  let _matTries = 0;
-  const enhanceMaterial = () => {
-    if (_matTries++ > 20) return;   // give up after ~14 s
+  // ── Custom Earth Shader ───────────────────────────────
+  // Replaces globe.gl's PhongMaterial with a full ShaderMaterial:
+  // day/night blend · specular ocean · bump · clouds · atmosphere
+  let _shaderTries = 0;
+  const initEarthShader = () => {
+    if (_shaderTries++ > 25) return;
     try {
-      let mat = (typeof globe.globeMaterial === 'function') ? globe.globeMaterial() : null;
-      if (!mat) {
-        globe.scene().traverse(obj => {
-          if (!mat && obj.isMesh && obj.material?.bumpMap) mat = obj.material;
+      // Find globe mesh via its material reference
+      const baseMat = globe.globeMaterial?.();
+      if (!baseMat) { setTimeout(initEarthShader, 600); return; }
+      let globeMesh = null;
+      globe.scene().traverse(obj => {
+        if (!globeMesh && obj.isMesh && obj.material === baseMat) globeMesh = obj;
+      });
+      if (!globeMesh) { setTimeout(initEarthShader, 600); return; }
+
+      const RADIUS = globeMesh.geometry.parameters?.radius ?? 100;
+      const tl     = new THREE.TextureLoader();
+      const CDN    = '//unpkg.com/three-globe/example/img/';
+
+      Promise.allSettled([
+        tl.loadAsync(CDN + 'earth-blue-marble.jpg'),
+        tl.loadAsync(CDN + 'earth-night.jpg'),
+        tl.loadAsync(CDN + 'earth-water.png'),
+        tl.loadAsync(CDN + 'earth-topology.png'),
+        tl.loadAsync(CDN + 'earth-clouds.png'),
+      ]).then(([r0, r1, r2, r3, r4]) => {
+        const ok = r => r.status === 'fulfilled' ? r.value : null;
+        const dayTex   = ok(r0);
+        const nightTex = ok(r1);
+        const waterTex = ok(r2);
+        const bumpTex  = ok(r3);
+        const cloudTex = ok(r4);
+        if (!dayTex) return;
+
+        const sunDir = new THREE.Vector3();
+        const updateSun = () => {
+          const h = new Date();
+          const utcH = h.getUTCHours() + h.getUTCMinutes() / 60 + h.getUTCSeconds() / 3600;
+          const lng  = (180 - utcH * 15) * Math.PI / 180;
+          sunDir.set(Math.cos(lng), 0.1, Math.sin(lng)).normalize();
+        };
+        updateSun();
+
+        // ── Earth ShaderMaterial ──────────────────────
+        const earthMat = new THREE.ShaderMaterial({
+          uniforms: {
+            uDay:      { value: dayTex },
+            uNight:    { value: nightTex ?? dayTex },
+            uWater:    { value: waterTex ?? dayTex },
+            uBump:     { value: bumpTex  ?? dayTex },
+            uCloud:    { value: cloudTex ?? dayTex },
+            uCloudOffset: { value: 0.0 },
+            uSunDir:   { value: sunDir },
+            uHasNight: { value: nightTex ? 1.0 : 0.0 },
+            uHasWater: { value: waterTex ? 1.0 : 0.0 },
+            uHasBump:  { value: bumpTex  ? 1.0 : 0.0 },
+            uHasCloud: { value: cloudTex ? 1.0 : 0.0 },
+          },
+          vertexShader: /* glsl */`
+            varying vec2  vUv;
+            varying vec3  vNormal;
+            varying vec3  vViewPos;
+            void main() {
+              vUv      = uv;
+              vNormal  = normalize(normalMatrix * normal);
+              vViewPos = (modelViewMatrix * vec4(position, 1.0)).xyz;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+          `,
+          fragmentShader: /* glsl */`
+            uniform sampler2D uDay, uNight, uWater, uBump, uCloud;
+            uniform float uCloudOffset, uHasNight, uHasWater, uHasBump, uHasCloud;
+            uniform vec3  uSunDir;
+            varying vec2 vUv;
+            varying vec3 vNormal;
+            varying vec3 vViewPos;
+
+            void main() {
+              vec3 N = normalize(vNormal);
+              vec3 V = normalize(-vViewPos);
+              vec3 L = normalize(uSunDir);
+
+              // Screen-space bump (only when bump texture loaded)
+              vec3 bN = N;
+              if (uHasBump > 0.5) {
+                vec2 px  = vec2(dFdx(vUv.x), dFdy(vUv.y)) * 0.5;
+                float b0 = texture2D(uBump, vUv).r;
+                float bx = texture2D(uBump, vUv + vec2(px.x, 0.0)).r;
+                float by = texture2D(uBump, vUv + vec2(0.0, px.y)).r;
+                bN = normalize(N
+                  + 1.4 * (bx - b0) * normalize(cross(N, vec3(0.0, 1.0, 0.01)))
+                  + 1.4 * (by - b0) * normalize(cross(N, vec3(1.0, 0.0, 0.0))));
+              }
+
+              float diff   = dot(bN, L);
+              float dayMix = smoothstep(-0.12, 0.28, diff);
+
+              vec3 day = texture2D(uDay, vUv).rgb;
+              day      = day * (0.06 + 0.94 * max(diff, 0.0));
+
+              vec3 color = day;
+              if (uHasNight > 0.5) {
+                vec3 night = texture2D(uNight, vUv).rgb;
+                night      = night * 2.0 * (1.0 - smoothstep(-0.25, 0.12, diff));
+                color      = mix(night, day, dayMix);
+              }
+
+              // Specular ocean
+              if (uHasWater > 0.5) {
+                float water = texture2D(uWater, vUv).r;
+                vec3  H     = normalize(L + V);
+                float spec  = pow(max(dot(bN, H), 0.0), 90.0) * max(diff, 0.0);
+                color += water * spec * 0.55 * vec3(1.0, 0.97, 0.93);
+              }
+
+              // Clouds
+              if (uHasCloud > 0.5) {
+                vec2  cUv   = vec2(vUv.x + uCloudOffset, vUv.y);
+                float cloud = texture2D(uCloud, cUv).r;
+                float cLit  = max(dot(N, L), 0.0) * 0.6 + 0.4;
+                color = mix(color, vec3(cLit * (0.4 + 0.6 * dayMix)), cloud * 0.72);
+              }
+
+              // Fresnel atmosphere hint
+              float rim = pow(1.0 - max(dot(N, V), 0.0), 4.5);
+              color += rim * 0.07 * vec3(0.35, 0.65, 1.0) * max(diff * 0.5 + 0.5, 0.0);
+
+              gl_FragColor = vec4(color, 1.0);
+            }
+          `,
         });
-      }
-      if (!mat?.bumpMap) { setTimeout(enhanceMaterial, 700); return; }
-      mat.bumpScale = 0.7;           // default ~0.05 → visible mountain ridges
-      mat.specular.set('#0d1f2d');   // subtle ocean sheen vs matte land
-      mat.shininess  = 14;
-      mat.needsUpdate = true;
+
+        globeMesh.material = earthMat;
+
+        // ── Atmosphere sphere ─────────────────────────
+        const atmGeo = new THREE.SphereGeometry(RADIUS * 1.028, 64, 32);
+        const atmMat = new THREE.ShaderMaterial({
+          transparent: true,
+          side:        THREE.FrontSide,
+          depthWrite:  false,
+          blending:    THREE.AdditiveBlending,
+          uniforms: { uSunDir: { value: sunDir } },
+          vertexShader: /* glsl */`
+            varying vec3 vNormal;
+            varying vec3 vViewPos;
+            void main() {
+              vNormal  = normalize(normalMatrix * normal);
+              vViewPos = (modelViewMatrix * vec4(position, 1.0)).xyz;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+          `,
+          fragmentShader: /* glsl */`
+            uniform vec3 uSunDir;
+            varying vec3 vNormal;
+            varying vec3 vViewPos;
+            void main() {
+              vec3  N   = normalize(vNormal);
+              vec3  V   = normalize(-vViewPos);
+              float rim = 1.0 - max(dot(N, V), 0.0);
+              rim        = pow(rim, 2.8);
+              float day  = max(dot(N, normalize(uSunDir)) * 0.5 + 0.6, 0.0);
+              vec3  col  = vec3(0.22, 0.52, 1.0);
+              float a    = rim * 0.72 * day;
+              gl_FragColor = vec4(col * a, a);
+            }
+          `,
+        });
+        const atmMesh = new THREE.Mesh(atmGeo, atmMat);
+        globeMesh.parent.add(atmMesh);
+
+        // ── Animate: clouds + sun ─────────────────────
+        let cloudOffset = 0;
+        const tick = () => {
+          requestAnimationFrame(tick);
+          cloudOffset += 0.000025;
+          earthMat.uniforms.uCloudOffset.value = cloudOffset;
+        };
+        tick();
+        setInterval(updateSun, 60_000); // update sun position every minute
+      });
     } catch (_) {}
   };
-  setTimeout(enhanceMaterial, 800);
+  setTimeout(initEarthShader, 1200);
 
   // Pause rotation on drag, resume after 4 s.
   // FIX: listen on window for pointerup/pointercancel so release outside
@@ -380,12 +545,6 @@ function initGlobe() {
     ldr.classList.add('fade-out');
     setTimeout(() => (ldr.style.display = 'none'), 1100);
   }, 2500);
-}
-
-/** Drive atmosphere colour from Kp (unified via kpColor) */
-function setAtmosphere(kp) {
-  if (!globe) return;
-  globe.atmosphereColor(kpColor(kp));
 }
 
 /** EQ rings only */
@@ -489,7 +648,7 @@ function updateGlobeEQ(features) {
     const med = mag >= 4.5 && !big;
     return {
       lat, lng,
-      rgb: hexRGB(col),
+      rgb: hexToRgb(col),
       // Radius: small fast ↔ large slow
       r:   big ? Math.max(2.5, mag * 1.4)
                : med ? Math.max(1.2, mag * 0.85)
@@ -544,8 +703,10 @@ function updateGlobeCME(cmes) {
       elat:  (hashFloat(key, 3) - 0.5) * 60,
       elng:  hashFloat(key, 4) * 360 - 180,
       color: [C.amber, C.red],
-      w:     0.4 + hashFloat(key, 5) * 0.5,
-      t:     Math.max(1500, 5500 - (c.speed || 500) * 2),
+      w:     0.6 + hashFloat(key, 5) * 0.7,
+      t:     Math.max(1200, 5000 - (c.speed || 500) * 2),
+      dashLen: 0.28,
+      dashGap: 0.08,
     };
   });
   cmeArcs = arcs;
@@ -839,7 +1000,6 @@ async function fetchKpIndex() {
   fillEl.style.width         = `${(kp / 9) * 100}%`;
   fillEl.style.background    = col;
 
-  setAtmosphere(kp);   // atmosphere now uses same kpColor() function
   setNoaa('ok');
 }
 
@@ -1242,7 +1402,6 @@ async function fetchSWPCAlerts() {
       // Format issue date simply: "2026-02-12 12:00:00.000" → "12 Feb · 12:00 UTC"
       const dt = latest.issue_datetime ?? '';
       const dParts = dt.match(/(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/);
-      const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
       const alertDate = dParts
         ? `${parseInt(dParts[3])} ${MONTHS[parseInt(dParts[2])-1]} · ${dParts[4]}:${dParts[5]} UTC`
         : '';
@@ -1454,7 +1613,7 @@ const SOL_PLANETS = [
   { abbr:'Ma', col:'#e26060', L0:355.45332, n:0.52402068, a:1.524, pr:4.5, rf:0.45 },
   { abbr:'J',  col:'#f5a055', L0: 34.89427, n:0.08308529, a:5.203, pr:9,   rf:0.65, glow:true },
   { abbr:'S',  col:'#c0d4f0', L0: 49.55953, n:0.03344927, a:9.537, pr:8,   rf:0.83, satRing:true },
-];
+].map(p => ({ ...p, rgb: hexToRgb(p.col) }));
 
 /**
  * Geocentric ecliptic angle (rad) — direction from Earth to planet.
@@ -1474,12 +1633,6 @@ function solGeoAngle(planet, dJ) {
 function solSunAngle(dJ) {
   const Le = ((_E_L0 + _E_n * dJ) % 360 + 360) % 360 * _D2R;
   return Math.atan2(-Math.sin(Le), -Math.cos(Le));
-}
-
-/** Hex '#rrggbb' → [r, g, b] numbers */
-function hexToRgb(hex) {
-  const n = parseInt(hex.replace('#', ''), 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
 // ── Planet metadata for interactivity ──
@@ -1672,41 +1825,50 @@ function drawSolarSystem(ts) {
   }
 
   // ── Orbit rings (heliocentric, centered on Sun) ───────────
-  // Earth orbit
-  const eOrbitR = s;
-  if (_solVisible['ORBITS'] && _solVisible['E']) {
-    ctx.beginPath(); ctx.arc(cx, cy, eOrbitR, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(0,245,196,0.07)'; ctx.lineWidth = 5; ctx.stroke();
-    ctx.beginPath(); ctx.arc(cx, cy, eOrbitR, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(0,245,196,0.28)'; ctx.lineWidth = 0.8; ctx.stroke();
+  // Helper: draw 3-pass orbit ring (outer glow → inner glow → crisp line)
+  function drawOrbit(r, R, G, B) {
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${R},${G},${B},0.04)`; ctx.lineWidth = 9; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${R},${G},${B},0.09)`; ctx.lineWidth = 3; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${R},${G},${B},0.38)`; ctx.lineWidth = 0.6; ctx.stroke();
   }
 
-  // Other planet orbits
+  const eOrbitR = s;
+  if (_solVisible['ORBITS'] && _solVisible['E']) drawOrbit(eOrbitR, 0, 245, 196);
+
   SOL_PLANETS.forEach(p => {
     if (!_solVisible['ORBITS'] || !_solVisible[p.abbr]) return;
-    const r = s * Math.sqrt(p.a);
-    const [pr, pg, pb] = hexToRgb(p.col);
-    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(${pr},${pg},${pb},0.07)`; ctx.lineWidth = 5; ctx.stroke();
-    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(${pr},${pg},${pb},0.30)`; ctx.lineWidth = 0.8; ctx.stroke();
+    drawOrbit(s * Math.sqrt(p.a), ...p.rgb);
   });
 
   // ── Sun disc ──────────────────────────────────────────────
   if (_solVisible['SOL']) {
-    const sunGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, 34);
-    sunGlow.addColorStop(0,    'rgba(255,248,200,1)');
-    sunGlow.addColorStop(0.20, 'rgba(255,220,100,0.85)');
-    sunGlow.addColorStop(0.55, 'rgba(255,160,30,0.35)');
+    const sPulse = 0.06 + 0.04 * Math.sin(ts * 0.0007);
+    const outerR = 50 + 8 * Math.sin(ts * 0.0004);
+    const corona = ctx.createRadialGradient(cx, cy, 6, cx, cy, outerR);
+    corona.addColorStop(0,    `rgba(255,240,130,${sPulse + 0.08})`);
+    corona.addColorStop(0.35, `rgba(255,180,40,${sPulse})`);
+    corona.addColorStop(0.70, `rgba(255,100,10,0.02)`);
+    corona.addColorStop(1,    'rgba(255,80,0,0)');
+    ctx.beginPath(); ctx.arc(cx, cy, outerR, 0, Math.PI * 2);
+    ctx.fillStyle = corona; ctx.fill();
+
+    const sunGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, 28);
+    sunGlow.addColorStop(0,    'rgba(255,252,210,1)');
+    sunGlow.addColorStop(0.25, 'rgba(255,228,110,0.90)');
+    sunGlow.addColorStop(0.60, 'rgba(255,160,30,0.40)');
     sunGlow.addColorStop(1,    'rgba(255,100,0,0)');
-    ctx.beginPath(); ctx.arc(cx, cy, 34, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(cx, cy, 28, 0, Math.PI * 2);
     ctx.fillStyle = sunGlow; ctx.fill();
     ctx.beginPath(); ctx.arc(cx, cy, 7, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff8c8'; ctx.fill();
-    ctx.font = '600 8px "Fira Code",monospace';
-    ctx.fillStyle = 'rgba(255,218,90,0.65)';
+    ctx.fillStyle = '#fffde0'; ctx.fill();
+
+    ctx.font = '500 8px "Fira Code",monospace';
+    ctx.fillStyle = 'rgba(255,218,90,0.55)';
     ctx.textAlign = 'center';
-    ctx.fillText('SOL', cx, cy - 20);
+    ctx.fillText('SOL', cx, cy - 22);
   }
 
   // ── Helper: draw a 3D sphere ──────────────────────────────
@@ -1736,7 +1898,7 @@ function drawSolarSystem(ts) {
     const diR = s * Math.sqrt(p.a);
     const px  = cx + diR * Math.cos(Lp);
     const py  = cy - diR * Math.sin(Lp);
-    const [r, g, b] = hexToRgb(p.col);
+    const [r, g, b] = p.rgb;
 
     // Atmosphere
     const atmR = p.glow ? p.pr * 5.0 : p.pr * 3.2;
@@ -1786,10 +1948,19 @@ function drawSolarSystem(ts) {
       }
     }
 
-    ctx.font = isAct ? '700 9px "Fira Code",monospace' : '600 8px "Fira Code",monospace';
-    ctx.fillStyle = isAct ? `rgba(${r},${g},${b},1)` : `rgba(${r},${g},${b},0.80)`;
+    // Leader line from label baseline to planet edge
+    const labelY  = py - p.pr - 15;
+    const edgeY   = py - p.pr - 2;
+    ctx.beginPath();
+    ctx.moveTo(px, labelY + 1);
+    ctx.lineTo(px, edgeY);
+    ctx.strokeStyle = `rgba(${r},${g},${b},${isAct ? 0.55 : 0.28})`;
+    ctx.lineWidth = 0.7; ctx.setLineDash([]); ctx.stroke();
+
+    ctx.font = isAct ? '700 9px "Fira Code",monospace' : '500 8px "Fira Code",monospace';
+    ctx.fillStyle = isAct ? `rgba(${r},${g},${b},1)` : `rgba(${r},${g},${b},0.72)`;
     ctx.textAlign = 'center';
-    ctx.fillText(p.abbr, px, py - p.pr - 6);
+    ctx.fillText(p.abbr, px, labelY);
   });
 
   // ── Earth at heliocentric position ────────────────────────
@@ -1798,40 +1969,60 @@ function drawSolarSystem(ts) {
   const eAlpha = 0.55 + 0.25 * Math.sin(t * 1.3);
 
   if (_solVisible['E']) {
-    // atmosphere
-    const eAtm = ctx.createRadialGradient(eX, eY, 4, eX, eY, 20);
-    eAtm.addColorStop(0,   'rgba(0,245,196,0.22)');
-    eAtm.addColorStop(0.6, 'rgba(0,180,150,0.06)');
+    // Outer soft glow halo
+    const eAtm = ctx.createRadialGradient(eX, eY, 5, eX, eY, 24);
+    eAtm.addColorStop(0,   'rgba(0,245,196,0.18)');
+    eAtm.addColorStop(0.55,'rgba(0,200,160,0.06)');
     eAtm.addColorStop(1,   'rgba(0,245,196,0)');
-    ctx.beginPath(); ctx.arc(eX, eY, 20, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(eX, eY, 24, 0, Math.PI * 2);
     ctx.fillStyle = eAtm; ctx.fill();
 
-    // sphere (light from Sun)
+    // 3D sphere (light from Sun)
     drawSphere(eX, eY, 6, 30, 150, 220, cx, cy);
 
-    // pulsing ring
+    // Pulsing ring
     ctx.beginPath(); ctx.arc(eX, eY, ePulse, 0, Math.PI * 2);
     ctx.strokeStyle = `rgba(0,245,196,${eAlpha.toFixed(2)})`;
-    ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.lineWidth = 1.2; ctx.stroke();
 
-    // hit area
-    _solPlanetPos['E'] = { px: eX, py: eY, hR: 20 };
+    // Crosshair tick marks at cardinal points on the pulsing ring
+    [0, Math.PI / 2, Math.PI, Math.PI * 1.5].forEach(angle => {
+      const tx1 = eX + Math.cos(angle) * (ePulse - 3);
+      const ty1 = eY + Math.sin(angle) * (ePulse - 3);
+      const tx2 = eX + Math.cos(angle) * (ePulse + 3.5);
+      const ty2 = eY + Math.sin(angle) * (ePulse + 3.5);
+      ctx.beginPath(); ctx.moveTo(tx1, ty1); ctx.lineTo(tx2, ty2);
+      ctx.strokeStyle = `rgba(0,245,196,${(eAlpha * 0.7).toFixed(2)})`;
+      ctx.lineWidth = 0.8; ctx.stroke();
+    });
 
-    // hover / select ring for Earth
+    // Hit area
+    _solPlanetPos['E'] = { px: eX, py: eY, hR: 22 };
+
+    // Hover / select ring
     const eAct = _solHovered === 'E' || _solSelected === 'E';
     if (eAct) {
-      ctx.beginPath(); ctx.arc(eX, eY, 13, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(0,245,196,0.85)';
-      ctx.lineWidth = 1.5; ctx.setLineDash([3,4]); ctx.stroke(); ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(eX, eY, 14, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(0,245,196,0.80)';
+      ctx.lineWidth = 1.2; ctx.setLineDash([3,5]); ctx.stroke(); ctx.setLineDash([]);
       if (_solSelected === 'E') {
-        ctx.beginPath(); ctx.arc(eX, eY, 20, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(0,245,196,0.30)'; ctx.lineWidth = 1; ctx.stroke();
+        ctx.beginPath(); ctx.arc(eX, eY, 21, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(0,245,196,0.25)'; ctx.lineWidth = 0.8; ctx.stroke();
       }
     }
-    ctx.font = eAct ? '700 9px "Fira Code",monospace' : '600 8px "Fira Code",monospace';
-    ctx.fillStyle = eAct ? 'rgba(0,245,196,1)' : 'rgba(0,245,196,0.85)';
+
+    // Leader line + label
+    const eLabelY = eY - ePulse - 11;
+    ctx.beginPath();
+    ctx.moveTo(eX, eLabelY + 1);
+    ctx.lineTo(eX, eY - ePulse - 2);
+    ctx.strokeStyle = `rgba(0,245,196,${eAct ? 0.55 : 0.32})`;
+    ctx.lineWidth = 0.7; ctx.setLineDash([]); ctx.stroke();
+
+    ctx.font = eAct ? '700 9px "Fira Code",monospace' : '500 8px "Fira Code",monospace';
+    ctx.fillStyle = eAct ? 'rgba(0,245,196,1)' : 'rgba(0,245,196,0.82)';
     ctx.textAlign = 'center';
-    ctx.fillText('E', eX, eY - 13);
+    ctx.fillText('E', eX, eLabelY);
   }
 
   // ── CME shockwave from Earth ──────────────────────────────
@@ -1966,17 +2157,7 @@ function boot() {
   if (booted) return;
   booted = true;
 
-  if (typeof Globe === 'undefined') {
-    // Globe.gl CDN failed to load
-    const ldr = document.getElementById('globe-loading');
-    ldr.innerHTML = `
-      <span style="color:#48607a;font-size:10px;letter-spacing:2px;text-align:center">
-        GLOBE.GL UNAVAILABLE<br>
-        <span style="font-size:9px;opacity:.6">Check network connection</span>
-      </span>`;
-  } else {
-    initGlobe();
-  }
+  initGlobe();
 
   initCharts();
   initChips();
