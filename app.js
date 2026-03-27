@@ -385,6 +385,12 @@ function initGlobe() {
         const cloudTex = ok(r4);
         if (!dayTex) return;
 
+        // Cloud texture must repeat horizontally so the offset scroll never shows seams
+        if (cloudTex) {
+          cloudTex.wrapS = THREE.RepeatWrapping;
+          cloudTex.needsUpdate = true;
+        }
+
         const sunDir = new THREE.Vector3();
         const updateSun = () => {
           const h = new Date();
@@ -451,10 +457,10 @@ function initGlobe() {
               float rawDiff = dot(N, L);
               float dayMix = smoothstep(-0.15, 0.25, diff);
 
-              // Day: slight contrast boost and cool-tint correction
+              // Day: slight contrast boost + ambient floor so night-side ocean isn't pure black
               vec3 day = texture2D(uDay, vUv).rgb;
               day = pow(day, vec3(0.92));              // gamma lift for vibrancy
-              day = day * (0.05 + 0.95 * max(diff, 0.0));
+              day = day * (0.08 + 0.92 * max(diff, 0.0));
 
               vec3 color = day;
               if (uHasNight > 0.5) {
@@ -477,7 +483,7 @@ function initGlobe() {
 
               // Clouds — fade out on zoom (uCloudFade 0→1)
               if (uHasCloud > 0.5 && uCloudFade > 0.01) {
-                vec2  cUv   = vec2(vUv.x + uCloudOffset, vUv.y);
+                vec2  cUv   = vec2(fract(vUv.x + uCloudOffset), vUv.y);
                 float cloud = texture2D(uCloud, cUv).r * uCloudFade;
                 float cLit  = max(dot(N, L), 0.0) * 0.7 + 0.3;
                 float cShadow = 1.0 - cloud * 0.35;
@@ -498,7 +504,8 @@ function initGlobe() {
 
         // ── Atmosphere sphere (inner — tight blue rim) ────
         const atmFrag = /* glsl */`
-          uniform vec3 uSunDir;
+          uniform vec3  uSunDir;
+          uniform float uAtmFade;
           varying vec3 vNormal;
           varying vec3 vViewPos;
           void main() {
@@ -512,7 +519,7 @@ function initGlobe() {
             vec3  dayCol   = vec3(0.18, 0.50, 1.00);
             vec3  nightCol = vec3(0.45, 0.18, 0.08);
             vec3  col = mix(nightCol * night, dayCol * day, smoothstep(0.0, 0.5, day));
-            float a   = rim * 0.42;
+            float a   = rim * 0.42 * uAtmFade;
             gl_FragColor = vec4(col * a, a);
           }
         `;
@@ -534,7 +541,7 @@ function initGlobe() {
         // Inner atmosphere (tight rim)
         const atmMesh = new THREE.Mesh(
           new THREE.SphereGeometry(RADIUS * 1.030, 64, 32),
-          makeAtmMat({ uSunDir: { value: sunDir } })
+          makeAtmMat({ uSunDir: { value: sunDir }, uAtmFade: { value: 1.0 } })
         );
         globeMesh.parent.add(atmMesh);
 
@@ -542,10 +549,11 @@ function initGlobe() {
         const outerMat = new THREE.ShaderMaterial({
           transparent: true, side: THREE.FrontSide,
           depthWrite: false, blending: THREE.AdditiveBlending,
-          uniforms: { uSunDir: { value: sunDir } },
+          uniforms: { uSunDir: { value: sunDir }, uAtmFade: { value: 1.0 } },
           vertexShader: atmVert,
           fragmentShader: /* glsl */`
-            uniform vec3 uSunDir;
+            uniform vec3  uSunDir;
+            uniform float uAtmFade;
             varying vec3 vNormal;
             varying vec3 vViewPos;
             void main() {
@@ -555,7 +563,7 @@ function initGlobe() {
               rim        = pow(rim, 1.5);
               float day  = max(dot(N, normalize(uSunDir)) * 0.4 + 0.55, 0.0);
               vec3  col  = vec3(0.08, 0.28, 0.85);
-              float a    = rim * 0.10 * day;
+              float a    = rim * 0.10 * day * uAtmFade;
               gl_FragColor = vec4(col * a, a);
             }
           `,
@@ -566,17 +574,182 @@ function initGlobe() {
         );
         globeMesh.parent.add(outerMesh);
 
-        // ── Animate: clouds + sun ─────────────────────
+        // ── ESRI Satellite tile overlay ─────────────────────
+        // Tiles are added to globe.scene() (scene root) — Globe.gl never clears it.
+        // Coordinate mapping: phi=(lng+180)*π/180, theta=(90-lat)*π/180 matches
+        // Three.js SphereGeometry UV→world space (verified with Globe.gl's coordinate system).
+        const ESRI_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile';
+        const tileScene  = globe.scene();
+        const tileParent = new THREE.Group();
+        tileScene.add(tileParent);
+
+        const tileCache = new Map();   // key → { mesh, loading }
+        const tileTL    = new THREE.TextureLoader();
+        tileTL.crossOrigin = 'anonymous';
+        const MAX_TILES = 64;
+
+        // Altitude → Web Mercator zoom level (0 = disabled)
+        function altToZoom(alt) {
+          if (alt > 0.80) return 0;
+          if (alt > 0.35) return 5;
+          if (alt > 0.14) return 7;
+          if (alt > 0.05) return 10;
+          if (alt > 0.02) return 13;
+          return 15;
+        }
+
+        function tile2lng(x, z) { return x / (1 << z) * 360 - 180; }
+        function tile2lat(y, z) {
+          const n = Math.PI * (1 - 2 * y / (1 << z));
+          return (180 / Math.PI) * Math.atan(Math.sinh(n));
+        }
+
+        function removeTile(key) {
+          const v = tileCache.get(key);
+          if (!v) return;
+          if (v.mesh) {
+            tileParent.remove(v.mesh);
+            v.mesh.geometry.dispose();
+            v.mesh.material.map?.dispose();
+            v.mesh.material.dispose();
+          }
+          tileCache.delete(key);
+        }
+
+        function evictOldest() {
+          let oldestT = Infinity, oldestKey = null;
+          tileCache.forEach((v, k) => { if (v.ts < oldestT) { oldestT = v.ts; oldestKey = k; } });
+          if (oldestKey) removeTile(oldestKey);
+        }
+
+        function loadTile(key, tx, ty, tz) {
+          if (tileCache.has(key)) { tileCache.get(key).ts = Date.now(); return; }
+          if (tileCache.size >= MAX_TILES) evictOldest();
+
+          const entry = { ts: Date.now(), mesh: null, loading: true };
+          tileCache.set(key, entry);
+
+          tileTL.load(
+            `${ESRI_URL}/${tz}/${ty}/${tx}`,
+            tex => {
+              if (!tileCache.has(key)) { tex.dispose(); return; }
+              // Build sphere patch matching this tile's lat/lng bounds
+              const n = tile2lat(ty,     tz),  s = tile2lat(ty + 1, tz);
+              const w = tile2lng(tx,     tz),  e = tile2lng(tx + 1, tz);
+              const phi0   = (w + 180) * Math.PI / 180;
+              const phiLen = (e - w)   * Math.PI / 180;
+              const th0    = (90 - n)  * Math.PI / 180;
+              const thLen  = (n  - s)  * Math.PI / 180;
+              const segs   = tz >= 13 ? 32 : tz >= 10 ? 20 : tz >= 7 ? 12 : 8;
+              const geo = new THREE.SphereGeometry(
+                RADIUS * 1.0012, segs, segs, phi0, phiLen, th0, thLen
+              );
+              tex.colorSpace = THREE.SRGBColorSpace;
+              const mat = new THREE.MeshBasicMaterial({
+                map: tex, transparent: true, opacity: 0,
+                depthWrite: false, depthTest: true,
+              });
+              const mesh = new THREE.Mesh(geo, mat);
+              mesh.renderOrder = 5;
+              tileParent.add(mesh);
+              entry.mesh    = mesh;
+              entry.loading = false;
+              // Smooth fade-in over ~400ms
+              let t = 0;
+              const fadeIn = () => {
+                t = Math.min(1, t + 0.05);
+                mat.opacity = t;
+                if (t < 1) requestAnimationFrame(fadeIn);
+              };
+              fadeIn();
+            },
+            undefined,
+            err => { console.warn('[tiles] load failed:', key, err); tileCache.delete(key); }
+          );
+        }
+
+        // Track last grid params
+        let _tLat = 999, _tLng = 999, _tZoom = -1, _tPanTimer = null;
+
+        function updateTiles() {
+          const pov = globe?.pointOfView?.();
+          if (!pov) return;
+          const { lat, lng, altitude: alt } = pov;
+          const tz = altToZoom(alt);
+
+          if (tz === 0) { tileParent.visible = false; return; }
+          tileParent.visible = true;
+
+          // Zoom level changed → load immediately (no debounce: user needs to see tiles)
+          if (tz !== _tZoom) {
+            _tLat = lat; _tLng = lng; _tZoom = tz;
+            _doLoadTiles(lat, lng, tz);
+            return;
+          }
+
+          // Same zoom, small pan → debounce to avoid request spam while dragging
+          const tileDeg = 360 / (1 << tz);
+          const panned = Math.abs(lat - _tLat) > tileDeg * 0.4
+                      || Math.abs(lng - _tLng) > tileDeg * 0.4;
+          if (!panned) return;
+
+          clearTimeout(_tPanTimer);
+          _tPanTimer = setTimeout(() => {
+            const p2 = globe?.pointOfView?.();
+            if (!p2 || altToZoom(p2.altitude) !== tz) return;
+            _tLat = p2.lat; _tLng = p2.lng;
+            _doLoadTiles(p2.lat, p2.lng, tz);
+          }, 200);
+        }
+
+        function _doLoadTiles(lat, lng, tz) {
+
+          const tmax = 1 << tz;
+          // Camera center tile (Web Mercator)
+          const cx = Math.floor((lng + 180) / 360 * tmax);
+          const sinLat = Math.sin(lat * Math.PI / 180);
+          const cy = Math.floor((0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * tmax);
+
+          // Grid radius by zoom: more tiles at lower zooms to cover the visible area
+          const r = tz <= 5 ? 3 : tz <= 7 ? 2 : 1;
+          const wantedKeys = new Set();
+          for (let dy = -r; dy <= r; dy++) {
+            for (let dx = -r; dx <= r; dx++) {
+              const tx  = ((cx + dx) % tmax + tmax) % tmax;
+              const ty  = Math.max(0, Math.min(tmax - 1, cy + dy));
+              const key = `${tz}/${ty}/${tx}`;
+              wantedKeys.add(key);
+              loadTile(key, tx, ty, tz);
+            }
+          }
+          // Remove tiles outside current grid (different zoom or far from view)
+          tileCache.forEach((_, k) => {
+            const kz = parseInt(k.split('/')[0]);
+            if (kz !== tz || !wantedKeys.has(k)) removeTile(k);
+          });
+        }
+
+        // ── Animate: clouds + sun + atmosphere + tiles ───────
         let cloudOffset = 0;
         const tick = () => {
           requestAnimationFrame(tick);
           cloudOffset += 0.000025;
           earthMat.uniforms.uCloudOffset.value = cloudOffset;
-          // Fade clouds based on camera altitude: full at alt≥0.4, gone at alt≤0.05
+
           const alt = globe?.pointOfView?.()?.altitude ?? 1.0;
+
+          // Cloud fade: full at alt≥0.4, gone at alt≤0.05
           earthMat.uniforms.uCloudFade.value = Math.max(0, Math.min(1,
             (alt - 0.05) / (0.4 - 0.05)
           ));
+
+          // Atmosphere fade: full at alt≥0.5, gone at alt≤0.10
+          const atmFade = Math.max(0, Math.min(1, (alt - 0.10) / (0.50 - 0.10)));
+          atmMesh.material.uniforms.uAtmFade.value  = atmFade;
+          outerMat.uniforms.uAtmFade.value          = atmFade;
+
+          // Satellite tile overlay
+          updateTiles();
         };
         tick();
         setInterval(updateSun, 60_000); // update sun position every minute
@@ -589,15 +762,17 @@ function initGlobe() {
   // FIX: listen on window for pointerup/pointercancel so release outside
   // the element doesn't leave the globe permanently paused.
   let rotateTimer;
-  el.addEventListener('pointerdown', () => {
-    globe.controls().autoRotate = false;
+  const pauseRotation = () => {
+    if (globe) globe.controls().autoRotate = false;
     clearTimeout(rotateTimer);
-  });
+  };
   const resumeRotation = () => {
     rotateTimer = setTimeout(() => {
       if (globe) globe.controls().autoRotate = true;
     }, 4000);
   };
+  el.addEventListener('pointerdown', pauseRotation);
+  el.addEventListener('wheel',       pauseRotation, { passive: true });
   window.addEventListener('pointerup',     resumeRotation);
   window.addEventListener('pointercancel', resumeRotation);
 
