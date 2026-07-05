@@ -8,14 +8,15 @@
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
-  --bg:       #080808;
-  --surf:     #0f0f0f;
-  --surf2:    #161616;
-  --border:   #242424;
-  --border2:  #303030;
-  --text:     #a8a8a8;
-  --dim:      #555555;
-  --bright:   #e8e8e8;
+  /* shadcn/ui zinc dark scale */
+  --bg:       #09090b;
+  --surf:     #101013;
+  --surf2:    #17171c;
+  --border:   #212127;
+  --border2:  #2e2e37;
+  --text:     #a1a1aa;
+  --dim:      #62626d;
+  --bright:   #f4f4f5;
 
   --teal:     #00f5c4;
   --amber:    #f5a623;
@@ -23,18 +24,28 @@
   --blue:     #4a8fe2;
 
   --bar-h:    50px;
+  --ov-h:     62px;
   --sidebar-w:330px;
 
+  --radius:   12px;
   --font:     'Fira Code', 'Courier New', monospace;
+  --font-ui:  'Inter', system-ui, -apple-system, sans-serif;
 }
 
 html, body {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: var(--font);
+  font-family: var(--font-ui);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Data values stay monospace for tabular alignment */
+#clock, .mval, .munit, .kp-num, .kp-frac, .qmag, .ecls, .xr-val,
+.ov-val, .bz-badge, .sm-hz, .spec-tab, .pf-thr, #pf-peak,
+.grs-cell, .nk-input, .alrt-msg, .qdepth, .qtime, .etime {
+  font-family: var(--font);
 }
 
 /* ── TOP BAR ──────────────────────────────────────── */
@@ -112,11 +123,169 @@ html, body {
 
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .2; } }
 
+/* ── SENSOR OVERVIEW STRIP ────────────────────────── */
+#overview {
+  position: fixed;
+  top: var(--bar-h);
+  left: 0; right: 0;
+  height: var(--ov-h);
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(9, 9, 11, 0.82);
+  backdrop-filter: blur(24px) saturate(130%);
+  -webkit-backdrop-filter: blur(24px) saturate(130%);
+  border-bottom: 1px solid var(--border);
+  z-index: 190;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+#overview::-webkit-scrollbar { display: none; }
+
+.ov-tile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: fit-content;
+  padding: 0 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.008));
+  transition: border-color 180ms ease-out, background 180ms ease-out;
+  white-space: nowrap;
+}
+.ov-tile:hover {
+  border-color: var(--border2);
+  background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.015));
+}
+.ov-tile {
+  cursor: pointer;
+  user-select: none;
+}
+.ov-tile:active { transform: scale(0.985); }
+.ov-tile:focus-visible {
+  outline: none;
+  border-color: rgba(0, 245, 196, 0.5);
+  box-shadow: 0 0 0 2px rgba(0, 245, 196, 0.18);
+}
+
+/* ── Hotspot dropdown menu (opens under a tile) ───── */
+#ov-menu {
+  position: fixed;
+  z-index: 400;
+  min-width: 224px;
+  max-width: 300px;
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px;
+  background: var(--surf);
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.65), inset 0 1px 0 rgba(255,255,255,.04);
+  animation: ovm-in 140ms ease-out;
+}
+#ov-menu.open { display: flex; }
+@keyframes ovm-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.ov-mi {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: 500 10px/1.3 var(--font);
+  letter-spacing: .4px;
+  border-radius: 7px;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 140ms ease-out, color 140ms ease-out;
+}
+.ov-mi:hover, .ov-mi:focus-visible {
+  background: rgba(255,255,255,.06);
+  color: var(--bright);
+  outline: none;
+}
+
+.ov-mi-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--dim);
+  flex-shrink: 0;
+}
+/* Strongest hotspot listed first — highlighted marker */
+.ov-mi:first-child .ov-mi-dot {
+  background: var(--teal);
+  box-shadow: 0 0 6px var(--teal);
+}
+
+.ov-ic {
+  width: 15px; height: 15px;
+  color: var(--dim);
+  flex-shrink: 0;
+}
+
+.ov-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+.ov-label {
+  font: 600 8px/1 var(--font-ui);
+  letter-spacing: 1.2px;
+  color: var(--dim);
+}
+.ov-val {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--bright);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.ov-badge {
+  font: 700 8px/1.6 var(--font-ui);
+  letter-spacing: 1px;
+  padding: 1px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--border2);
+  color: var(--dim);
+  transition: color .4s, border-color .4s, background .4s;
+}
+
+.ov-pri { min-width: 210px; flex: 1.4; }
+.ov-pri .ov-ic { color: var(--teal); }
+
+.ov-track {
+  height: 3px;
+  width: 100%;
+  background: var(--surf2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.ov-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--teal);
+  border-radius: 2px;
+  transition: width .9s ease, background .5s;
+}
+
 /* ── MAIN LAYOUT ──────────────────────────────────── */
 #main {
   display: flex;
-  height: calc(100vh - var(--bar-h));
-  margin-top: var(--bar-h);
+  height: calc(100vh - var(--bar-h) - var(--ov-h));
+  margin-top: calc(var(--bar-h) + var(--ov-h));
   overflow: hidden;
 }
 
@@ -177,6 +346,12 @@ html, body {
   gap: 5px;
   pointer-events: none;
   z-index: 5;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(9, 9, 11, 0.62);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
 }
 
 .leg-section {
@@ -197,6 +372,7 @@ html, body {
 }
 .leg-dot  { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .leg-line { width: 20px; height: 2px; border-radius: 1px; flex-shrink: 0; }
+.leg-svg  { width: 14px; height: 14px; flex-shrink: 0; overflow: visible; }
 
 /* ── SIDEBAR ──────────────────────────────────────── */
 #sidebar {
@@ -217,12 +393,19 @@ html, body {
 #sidebar::-webkit-scrollbar { width: 3px; }
 #sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
 
-/* ── DATA BLOCKS ──────────────────────────────────── */
+/* ── DATA BLOCKS (shadcn-style cards) ─────────────── */
 .block {
-  padding: 14px 16px;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
+  margin: 10px 12px 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(255,255,255,.025), rgba(255,255,255,.006));
+  box-shadow: 0 1px 2px rgba(0,0,0,.5);
   flex-shrink: 0;
+  transition: border-color 180ms ease-out;
 }
+.block:hover { border-color: var(--border2); }
+.block:last-of-type { margin-bottom: 10px; }
 
 .bhead {
   display: flex;
@@ -232,16 +415,19 @@ html, body {
 }
 
 .btitle {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 2.5px;
+  font: 600 10px/1 var(--font-ui);
+  letter-spacing: 1.6px;
   color: var(--bright);
   flex: 1;
 }
 .bsrc {
-  font-size: 8px;
+  font: 500 8px/1.6 var(--font-ui);
   color: var(--dim);
   letter-spacing: 1px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255,255,255,.02);
 }
 
 .bst {
@@ -261,7 +447,7 @@ html, body {
   flex: 1;
   background: rgba(255,255,255,0.03);
   border: 1px solid rgba(255,255,255,0.07);
-  border-radius: 9px;
+  border-radius: 10px;
   padding: 9px 11px;
   min-width: 0;
   transition: border-color 160ms ease-out, background 160ms ease-out;
@@ -307,7 +493,7 @@ html, body {
   font-weight: 700;
   letter-spacing: 2px;
   padding: 3px 9px;
-  border-radius: 3px;
+  border-radius: 6px;
   border: 1px solid;
   transition: all .5s;
 }
@@ -339,7 +525,7 @@ html, body {
   font-weight: 700;
   letter-spacing: 2px;
   padding: 3px 8px;
-  border-radius: 3px;
+  border-radius: 6px;
   border: 1px solid;
   margin-top: 4px;
   transition: all .5s;
@@ -425,9 +611,17 @@ html, body {
 @media (max-width: 768px) {
   html, body { overflow: auto; }
 
+  #overview {
+    position: static;
+    height: auto;
+    min-height: var(--ov-h);
+    margin-top: var(--bar-h);
+  }
+
   #main {
     flex-direction: column;
     height: auto;
+    margin-top: 0;
     overflow: visible;
   }
 
@@ -1051,44 +1245,44 @@ html, body {
 }
 #solar-bg.sol-off { opacity: 0; }
 
-/* ── Solar planet visibility controls ─────────────────── */
+/* ── Solar planet visibility controls — left-side panel ── */
 #sol-controls {
   position: absolute;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 14px;
+  left: 14px;
   z-index: 6;
   display: flex;
-  align-items: center;
-  gap: 2px;
-  background: rgba(10, 10, 10, 0.65);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  background: rgba(9, 9, 11, 0.72);
   backdrop-filter: blur(22px) saturate(120%);
   -webkit-backdrop-filter: blur(22px) saturate(120%);
-  padding: 6px 10px;
-  border-radius: 100px;
-  border: 1px solid rgba(255,255,255,0.09);
+  padding: 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
   box-shadow:
     0 8px 32px rgba(0,0,0,0.48),
-    0 0 0 1px rgba(255,255,255,0.03),
-    inset 0 1px 0 rgba(255,255,255,0.07);
+    inset 0 1px 0 rgba(255,255,255,0.05);
   pointer-events: auto;
   white-space: nowrap;
 }
 #sol-controls .sol-sep {
-  width: 1px;
-  height: 14px;
+  width: auto;
+  height: 1px;
   background: rgba(255,255,255,0.09);
-  margin: 0 4px;
+  margin: 4px 2px;
 }
 .sol-chip {
   font: 600 9px var(--font);
   letter-spacing: 0.07em;
-  padding: 4px 9px;
-  border-radius: 100px;
+  padding: 5px 10px;
+  border-radius: 7px;
   border: 1px solid rgba(255,255,255,0.08);
   cursor: pointer;
   background: rgba(255,255,255,0.03);
   outline: none;
+  text-align: center;
   transition: opacity 160ms ease-out, filter 160ms ease-out, background 160ms ease-out, transform 120ms ease-out, box-shadow 160ms ease-out;
   line-height: 1;
 }

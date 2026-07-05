@@ -120,6 +120,10 @@ const C = {
 // ── STATE ─────────────────────────────────────────────
 const APP = {
   kp:          0,
+  emSd:        0,     // EM field std-dev (nT) — geomag proxy
+  flux:        0,     // GOES X-ray flux W/m²
+  eq24:        0,     // earthquakes in last 24 h
+  pfPeak:      0,     // peak proton flux (pfu)
   earthquakes: [],
   // cmes removed — was declared but never written
 };
@@ -144,7 +148,7 @@ let schmHtmlData = [];
 
 // Globe point state
 let eqPoints = [];   // earthquake epicenter dots
-let sunPoint = [];   // subsolar glowing orb
+let sunHtml  = [];   // subsolar SVG sun marker (html layer)
 
 // ── IN-FLIGHT GUARDS (prevent duplicate concurrent fetches) ──
 let fastBusy = false;
@@ -270,7 +274,8 @@ function initGlobe() {
   // sizeGlobe() is called after layout paints (see timeouts below).
   globe = Globe()
     // ── Textures (minimal — custom shader takes over) ──
-    .globeImageUrl('https://raw.githubusercontent.com/turban/webgl-earth/master/images/2_no_clouds_4k.jpg')
+    // 8K NASA/SolarSystemScope day map via Wikimedia (CORS ✓)
+    .globeImageUrl('https://upload.wikimedia.org/wikipedia/commons/0/04/Solarsystemscope_texture_8k_earth_daymap.jpg')
     .bumpImageUrl('https://raw.githubusercontent.com/turban/webgl-earth/master/images/elev_bump_4k.jpg')
     .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
     .backgroundColor('#080808')
@@ -366,16 +371,18 @@ function initGlobe() {
 
       const RADIUS = globeMesh.geometry.parameters?.radius ?? 100;
       const tl     = new THREE.TextureLoader();
-      // 4K textures from turban/webgl-earth (raw.githubusercontent = CORS OK)
-      // Clouds: matteason live cloud map (updates every 3h, CORS enabled)
+      // 8K day/night: SolarSystemScope maps via Wikimedia Commons (CORS ✓)
+      // 4K water/bump masks: turban/webgl-earth (raw.githubusercontent = CORS OK)
+      // 8K clouds: matteason live cloud map (updates every 3h, CORS enabled)
       const GH  = 'https://raw.githubusercontent.com/turban/webgl-earth/master/images/';
+      const WM  = 'https://upload.wikimedia.org/wikipedia/commons/';
 
       Promise.allSettled([
-        tl.loadAsync(GH + '2_no_clouds_4k.jpg'),           // day — clean surface, no baked clouds
-        tl.loadAsync('https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-night.jpg'),
+        tl.loadAsync(WM + '0/04/Solarsystemscope_texture_8k_earth_daymap.jpg'),   // 8192×4096 day
+        tl.loadAsync(WM + 'b/b3/Solarsystemscope_texture_8k_earth_nightmap.jpg'), // 8192×4096 night
         tl.loadAsync(GH + 'water_4k.png'),                 // specular ocean mask
         tl.loadAsync(GH + 'elev_bump_4k.jpg'),             // 4K elevation bump
-        tl.loadAsync('https://clouds.matteason.co.uk/images/4096x2048/clouds.jpg'), // live clouds
+        tl.loadAsync('https://clouds.matteason.co.uk/images/8192x4096/clouds.jpg'), // live clouds 8K
       ]).then(([r0, r1, r2, r3, r4]) => {
         const ok = r => r.status === 'fulfilled' ? r.value : null;
         const dayTex   = ok(r0);
@@ -384,6 +391,12 @@ function initGlobe() {
         const bumpTex  = ok(r3);
         const cloudTex = ok(r4);
         if (!dayTex) return;
+
+        // Max anisotropic filtering — keeps 8K detail sharp at grazing angles
+        const maxAniso = globe.renderer?.()?.capabilities?.getMaxAnisotropy?.() ?? 8;
+        [dayTex, nightTex, waterTex, bumpTex, cloudTex].forEach(t => {
+          if (t) { t.anisotropy = maxAniso; t.needsUpdate = true; }
+        });
 
         // Cloud texture must repeat horizontally so the offset scroll never shows seams
         if (cloudTex) {
@@ -779,6 +792,7 @@ function initGlobe() {
   // ── Hide loader (2.5 s gives textures time to fetch & render) ───
   setTimeout(() => {
     const ldr = document.getElementById('globe-loading');
+    if (!ldr) return;   // removed on HMR remount
     ldr.classList.add('fade-out');
     setTimeout(() => (ldr.style.display = 'none'), 1100);
   }, 2500);
@@ -796,23 +810,22 @@ function syncArcs() {
   globe.arcsData(cmeArcs);
 }
 
-/** Schumann HTML markers */
+/** Schumann + subsolar SVG markers share the html layer */
 function syncSchmHtml() {
   if (!globe) return;
-  globe.htmlElementsData(schmHtmlData);
+  globe.htmlElementsData([...schmHtmlData, ...sunHtml]);
 }
 
-/** EQ epicenter dots + subsolar orb → pointsData */
+/** EQ epicenter dots → pointsData */
 function syncPoints() {
   if (!globe) return;
-  globe.pointsData([...eqPoints, ...sunPoint]);
+  globe.pointsData(eqPoints);
 }
 
 /**
- * Glowing orb at the current subsolar point (where Sun is directly overhead).
- * Uses pointsData with large radius + elevated altitude → always on the globe,
- * never outside the globe boundary (unlike htmlElementsData).
- * Color driven by X-ray flux class. Size: ~3× larger than biggest EQ dot.
+ * SVG sun marker at the current subsolar point (where Sun is directly overhead).
+ * Radial-gradient core + rotating rays + breathing halo.
+ * Color and pulse speed driven by X-ray flux class (flare = fast red/amber).
  */
 function updateSubsolar(flux) {
   if (!globe || !flux || flux <= 0) return;
@@ -825,10 +838,47 @@ function updateSubsolar(flux) {
   const cls     = xrayClass(flux);
   const col     = xrayColor(cls[0]);
   const isFlare = cls[0] === 'X' || cls[0] === 'M';
+  const core    = isFlare ? col : '#f5d76e';
+  const dur     = isFlare ? '1.4s' : '3.2s';
 
-  // Large glowing orb at altitude — visually unique vs EQ dots (tiny, altitude 0.005)
-  sunPoint = [{ lat: sunLat, lng: sunLng, col, r: isFlare ? 1.1 : 0.75, alt: 0.07 }];
-  syncPoints();
+  const sz = isFlare ? 52 : 42, c = sz / 2;
+  const rays = Array.from({ length: 8 }, (_, i) => {
+    const a  = (i / 8) * Math.PI * 2;
+    const r1 = c * 0.52, r2 = c * (i % 2 ? 0.70 : 0.82);
+    return `<line x1="${(c + Math.cos(a) * r1).toFixed(1)}" y1="${(c + Math.sin(a) * r1).toFixed(1)}"
+      x2="${(c + Math.cos(a) * r2).toFixed(1)}" y2="${(c + Math.sin(a) * r2).toFixed(1)}"
+      stroke="${core}" stroke-width="1.1" stroke-linecap="round" opacity="0.8"/>`;
+  }).join('');
+
+  const el = document.createElement('div');
+  el.style.cssText = `width:${sz}px;height:${sz}px;pointer-events:none`;
+  el.innerHTML = `<svg width="${sz}" height="${sz}" viewBox="0 0 ${sz} ${sz}"
+    style="display:block;overflow:visible" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <radialGradient id="sun-core-g">
+        <stop offset="0%"  stop-color="#fffbe8"/>
+        <stop offset="45%" stop-color="${core}"/>
+        <stop offset="100%" stop-color="${core}" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+    <style>
+      @keyframes sun-breathe{0%,100%{opacity:.85;transform:scale(1)}50%{opacity:.45;transform:scale(1.14)}}
+      .sun-halo{animation:sun-breathe ${dur} ease-in-out infinite;transform-origin:center}
+    </style>
+    <circle class="sun-halo" cx="${c}" cy="${c}" r="${c * 0.9}" fill="url(#sun-core-g)" opacity="0.35"/>
+    <g class="sun-rays">
+      ${rays}
+      <animateTransform attributeName="transform" type="rotate"
+        from="0 ${c} ${c}" to="360 ${c} ${c}" dur="26s" repeatCount="indefinite"/>
+    </g>
+    <circle cx="${c}" cy="${c}" r="${c * 0.30}" fill="url(#sun-core-g)"/>
+    <circle cx="${c}" cy="${c}" r="${c * 0.14}" fill="#fffbe8"/>
+    <circle cx="${c}" cy="${c}" r="${c * 0.42}" fill="none" stroke="${core}"
+      stroke-width="0.7" opacity="0.5" stroke-dasharray="2 3"/>
+  </svg>`;
+
+  sunHtml = [{ lat: sunLat, lng: sunLng, el }];
+  syncSchmHtml();
 }
 
 /** Known Schumann resonance source regions (tropical lightning hotspots) */
@@ -839,33 +889,47 @@ const SCHM_SOURCES = [
 ];
 
 /**
- * Schumann resonance markers — custom SVG HTML elements at 3 source regions.
- * Diamond/crosshair shape with CSS pulse — visually distinct from EQ rings
- * (which are circular expanding waves on the ring layer).
+ * Schumann resonance markers — layered "resonance node" SVGs at 3 source regions:
+ * gradient glow disc · expanding wave ring · rotating dashed orbit · bright core.
+ * Wave speed follows EM state (SPIKE = fast). Visually distinct from EQ rings.
  */
 function updateSchmGlobe(state, col) {
   if (!globe) return;
 
-  const dur  = state === 'SPIKE' ? '0.65s' : state === 'ACTIVE' ? '1.5s' : '3.0s';
-  const sz   = 26;
-  const half = sz / 2;
+  const dur = state === 'SPIKE' ? '0.9s' : state === 'ACTIVE' ? '1.8s' : '3.4s';
+  const sz  = 34, c = sz / 2;
 
-  schmHtmlData = SCHM_SOURCES.map(s => {
-    const el = document.createElement('div');
+  schmHtmlData = SCHM_SOURCES.map((s, i) => {
+    const gid = `schm-g-${i}`;
+    const el  = document.createElement('div');
     el.style.cssText = `width:${sz}px;height:${sz}px;pointer-events:none`;
     el.innerHTML = `<svg width="${sz}" height="${sz}" viewBox="0 0 ${sz} ${sz}"
-      style="display:block;animation:schm-pulse ${dur} ease-in-out infinite"
-      xmlns="http://www.w3.org/2000/svg">
-      <style>@keyframes schm-pulse{0%,100%{opacity:.9;transform:scale(1)}50%{opacity:.4;transform:scale(1.2)}}</style>
-      <polygon points="${half},2 ${sz-2},${half} ${half},${sz-2} 2,${half}"
-        fill="none" stroke="${col}" stroke-width="1.4" opacity="0.9"/>
-      <line x1="${half}" y1="${half-5}" x2="${half}" y2="${half+5}"
-        stroke="${col}" stroke-width="0.9" opacity="0.65"/>
-      <line x1="${half-5}" y1="${half}" x2="${half+5}" y2="${half}"
-        stroke="${col}" stroke-width="0.9" opacity="0.65"/>
-      <circle cx="${half}" cy="${half}" r="2" fill="${col}" opacity="1"/>
-      <circle cx="${half}" cy="${half}" r="${half-2}" fill="none"
-        stroke="${col}" stroke-width="0.5" opacity="0.22" stroke-dasharray="2 4"/>
+      style="display:block;overflow:visible" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <radialGradient id="${gid}">
+          <stop offset="0%"  stop-color="${col}" stop-opacity="0.55"/>
+          <stop offset="60%" stop-color="${col}" stop-opacity="0.12"/>
+          <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+      <style>
+        @keyframes schm-wave{0%{opacity:.85;transform:scale(.30)}100%{opacity:0;transform:scale(1.05)}}
+        @keyframes schm-core{0%,100%{opacity:1}50%{opacity:.55}}
+        .schm-w{animation:schm-wave ${dur} cubic-bezier(.2,.6,.4,1) infinite;transform-origin:center}
+        .schm-w2{animation-delay:calc(${dur} / -2)}
+        .schm-c{animation:schm-core ${dur} ease-in-out infinite}
+      </style>
+      <circle cx="${c}" cy="${c}" r="${c}" fill="url(#${gid})"/>
+      <circle class="schm-w"  cx="${c}" cy="${c}" r="${c - 2}" fill="none" stroke="${col}" stroke-width="1.1"/>
+      <circle class="schm-w schm-w2" cx="${c}" cy="${c}" r="${c - 2}" fill="none" stroke="${col}" stroke-width="0.8"/>
+      <g opacity="0.5">
+        <circle cx="${c}" cy="${c}" r="${c * 0.56}" fill="none" stroke="${col}"
+          stroke-width="0.7" stroke-dasharray="2.5 3.5"/>
+        <animateTransform attributeName="transform" type="rotate"
+          from="0 ${c} ${c}" to="360 ${c} ${c}" dur="14s" repeatCount="indefinite"/>
+      </g>
+      <circle class="schm-c" cx="${c}" cy="${c}" r="2.4" fill="${col}"/>
+      <circle cx="${c}" cy="${c}" r="1" fill="#eafffa"/>
     </svg>`;
     return { lat: s.lat, lng: s.lng, el };
   });
@@ -1113,6 +1177,231 @@ const setDot = (id, s) => { const el = document.getElementById(id); if (el) el.c
 const setBst = (id, s) => { const el = document.getElementById(id); if (el) el.className = `bst ${s}`;     };
 
 // FIX: setNoaa covers both dots — called explicitly in each NOAA fetcher
+/* ── OVERVIEW STRIP ──────────────────────────────────
+   Compact sensor values along the top + composite index */
+const setOv = (id, txt, col) => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = txt;
+  if (col) el.style.color = col;
+};
+
+/**
+ * Planetary Index — weighted composite of all vibration/frequency drivers:
+ * Kp (geomagnetic) · EM σ · X-ray flux (log) · 24h seismicity · proton flux (log).
+ * 0–100, updated whenever any contributing sensor refreshes.
+ */
+function updatePRI() {
+  const kpN = Math.min(APP.kp / 9, 1);
+  const emN = Math.min(APP.emSd / 6, 1);
+  const xrN = APP.flux > 0 ? Math.min(Math.max((Math.log10(APP.flux) + 8) / 4.5, 0), 1) : 0;
+  const eqN = Math.min(APP.eq24 / 40, 1);
+  const pfN = APP.pfPeak > 0 ? Math.min(Math.max(Math.log10(APP.pfPeak) / 5, 0), 1) : 0;
+
+  const idx = Math.round((kpN * 0.30 + emN * 0.20 + xrN * 0.20 + eqN * 0.15 + pfN * 0.15) * 100);
+
+  let label, col;
+  if      (idx < 25) { label = 'QUIET';    col = C.teal;  }
+  else if (idx < 45) { label = 'MODERATE'; col = C.blue;  }
+  else if (idx < 65) { label = 'ELEVATED'; col = C.amber; }
+  else               { label = 'CRITICAL'; col = C.red;   }
+
+  setOv('ov-pri', idx, col);
+
+  const badge = document.getElementById('ov-pri-state');
+  if (badge) {
+    badge.textContent        = label;
+    badge.style.color        = col;
+    badge.style.borderColor  = col;
+    badge.style.background   = `${col}15`;
+  }
+  const fill = document.getElementById('ov-pri-fill');
+  if (fill) {
+    fill.style.width      = `${idx}%`;
+    fill.style.background = col;
+  }
+}
+
+/* ── OVERVIEW → GLOBE NAVIGATION ─────────────────────
+   Click a sensor tile → camera flies to the hotspot.
+   Multiple hotspots → dropdown menu under the tile.  */
+
+let _flyTimer = null;
+
+/** Smooth camera flight; auto-rotation resumes after 15 s */
+function flyTo(lat, lng, altitude = 1.4, ms = 1400) {
+  if (!globe) return;
+  globe.controls().autoRotate = false;
+  globe.pointOfView({ lat, lng, altitude }, ms);
+  clearTimeout(_flyTimer);
+  _flyTimer = setTimeout(() => { if (globe) globe.controls().autoRotate = true; }, 15_000);
+}
+
+/** Normalize longitude to [-180, 180] */
+const norm180 = lng => ((lng + 540) % 360) - 180;
+
+/** Current subsolar point (Sun directly overhead) */
+function subsolarPos() {
+  const now = new Date();
+  const doy = Math.round((now - new Date(now.getFullYear(), 0, 0)) / 86_400_000);
+  const lat = 23.45 * Math.sin(2 * Math.PI * (doy - 81) / 365);
+  const h   = now.getUTCHours() + now.getUTCMinutes() / 60 + now.getUTCSeconds() / 3600;
+  const lng = ((h / 24) * -360 + 180 + 360) % 360 - 180;
+  return { lat, lng };
+}
+
+/** Geomag observatory coordinates */
+const GEO_STATIONS = [
+  { code: 'BOU', name: 'Boulder US',  lat: 40.14, lng: -105.24 },
+  { code: 'GUA', name: 'Guam PAC',    lat: 13.59, lng:  144.87 },
+  { code: 'SJG', name: 'San Juan PR', lat: 18.11, lng:  -66.15 },
+];
+
+/**
+ * Hotspot targets per overview tile, strongest activity first.
+ * Returns [{ label, lat, lng, alt }].
+ */
+function ovTargets(key) {
+  const sub      = subsolarPos();
+  const nightLng = norm180(sub.lng + 180);
+
+  const aurora = [
+    { label: 'Auroral oval · North (night side)', lat:  67, lng: nightLng, alt: 1.7 },
+    { label: 'Auroral oval · South (night side)', lat: -67, lng: nightLng, alt: 1.7 },
+  ];
+  const polar = [
+    { label: 'Polar cap · North', lat:  82, lng: nightLng, alt: 1.8 },
+    { label: 'Polar cap · South', lat: -82, lng: nightLng, alt: 1.8 },
+  ];
+  const quakes = () => (APP.earthquakes || [])
+    .filter(f => f.properties?.mag != null)
+    .slice()
+    .sort((a, b) => b.properties.mag - a.properties.mag)
+    .slice(0, 5)
+    .map(f => {
+      const [lng, lat] = f.geometry.coordinates;
+      return {
+        label: `M${f.properties.mag.toFixed(1)} · ${(f.properties.place || 'Unknown').slice(0, 34)}`,
+        lat, lng, alt: 1.0,
+      };
+    });
+
+  switch (key) {
+    case 'kp':
+    case 'bz':
+    case 'sw':
+      return aurora;
+
+    case 'xr':
+      return [{ label: 'Subsolar point · dayside impact', lat: sub.lat, lng: sub.lng, alt: 1.7 }];
+
+    case 'em': {
+      const sds = APP.stationSd || {};
+      return GEO_STATIONS
+        .map(s => ({
+          label: `${s.code} · ${s.name} · σ ${(sds[s.code] ?? 0).toFixed(2)} nT`,
+          lat: s.lat, lng: s.lng, alt: 1.3,
+          v: sds[s.code] ?? 0,
+        }))
+        .sort((a, b) => b.v - a.v);
+    }
+
+    case 'sr':
+      return [
+        { label: 'Central Africa · ~60% global lightning', lat:  5, lng:  20, alt: 1.4 },
+        { label: 'Amazon basin · Americas hotspot',        lat: -5, lng: -60, alt: 1.4 },
+        { label: 'Maritime continent · SE Asia',           lat:  5, lng: 105, alt: 1.4 },
+      ];
+
+    case 'eq':
+      return quakes();
+
+    case 'pf':
+      return polar;
+
+    case 'grs':
+      return [
+        { label: 'G · Auroral oval North', lat:  67, lng: nightLng, alt: 1.7 },
+        { label: 'G · Auroral oval South', lat: -67, lng: nightLng, alt: 1.7 },
+        { label: 'R · Dayside / subsolar', lat: sub.lat, lng: sub.lng, alt: 1.7 },
+        { label: 'S · Polar cap North',    lat:  82, lng: nightLng, alt: 1.8 },
+      ];
+
+    case 'pri': {
+      const eqTop = quakes().slice(0, 2).map(t => ({ ...t, label: 'EQ · ' + t.label }));
+      return [
+        ...eqTop,
+        { label: 'GEOMAG · Auroral oval North', lat: 67, lng: nightLng, alt: 1.7 },
+        { label: 'X-RAY · Subsolar point', lat: sub.lat, lng: sub.lng, alt: 1.7 },
+        { label: 'SR · Central Africa node', lat: 5, lng: 20, alt: 1.4 },
+      ];
+    }
+
+    default:
+      return [];
+  }
+}
+
+/** Wire up tile clicks + the dropdown menu */
+function initOverviewNav() {
+  const menu = document.createElement('div');
+  menu.id = 'ov-menu';
+  document.body.appendChild(menu);
+
+  const close = () => menu.classList.remove('open');
+
+  document.addEventListener('click', e => {
+    if (!menu.contains(e.target) && !e.target.closest('.ov-tile')) close();
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+
+  document.querySelectorAll('#overview .ov-tile').forEach(tile => {
+    const idEl = tile.querySelector('[id^="ov-"]');
+    if (!idEl) return;
+    const key = idEl.id.replace('ov-', '');
+    tile.setAttribute('role', 'button');
+    tile.setAttribute('tabindex', '0');
+
+    const activate = () => {
+      const targets = ovTargets(key);
+      if (!targets.length) return;
+
+      if (targets.length === 1) {
+        close();
+        flyTo(targets[0].lat, targets[0].lng, targets[0].alt);
+        return;
+      }
+
+      // Toggle: clicking the same tile again closes the menu
+      if (menu.classList.contains('open') && menu.dataset.key === key) { close(); return; }
+
+      menu.dataset.key = key;
+      menu.innerHTML = targets.map((t, i) =>
+        `<button class="ov-mi" data-i="${i}"><span class="ov-mi-dot"></span>${escHtml(t.label)}</button>`
+      ).join('');
+
+      const r = tile.getBoundingClientRect();
+      menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 300))}px`;
+      menu.style.top  = `${r.bottom + 6}px`;
+      menu.classList.add('open');
+
+      menu.querySelectorAll('.ov-mi').forEach(btn => {
+        btn.addEventListener('click', ev => {
+          ev.stopPropagation();
+          const t = targets[+btn.dataset.i];
+          close();
+          flyTo(t.lat, t.lng, t.alt);
+        });
+      });
+    };
+
+    tile.addEventListener('click', activate);
+    tile.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
+    });
+  });
+}
+
 const setNoaa = s => { setDot('d-noaa', s); setBst('bs-sw',   s); setBst('bs-kp',   s); };
 const setGoes = s => { setDot('d-goes', s); setBst('bs-xray', s);                        };
 const setGeo  = s => { setDot('d-geo',  s); setBst('bs-em',   s); setBst('bs-schm', s); };
@@ -1162,6 +1451,7 @@ async function fetchSolarWind() {
 
   document.getElementById('sw-spd').textContent = isNaN(speed)   ? '—' : Math.round(speed);
   document.getElementById('sw-den').textContent = isNaN(density) ? '—' : density.toFixed(1);
+  setOv('ov-sw', isNaN(speed) ? '—' : Math.round(speed), speed >= 600 ? C.amber : C.teal);
 
   // Last ~144 points ≈ 24 h at 10-min cadence
   const slice = rows.slice(-144);
@@ -1206,6 +1496,8 @@ async function fetchMag() {
   dirEl.textContent       = isNorth ? '↑ NORTH' : '↓ SOUTH';
   dirEl.style.color       = col;
   dirEl.style.background  = `${col}18`;
+
+  setOv('ov-bz', (bz >= 0 ? '+' : '') + bz.toFixed(1), col);
 }
 
 
@@ -1246,6 +1538,9 @@ async function fetchKpIndex() {
   badgeEl.style.background   = `${col}18`;
   fillEl.style.width         = `${(kp / 9) * 100}%`;
   fillEl.style.background    = col;
+
+  setOv('ov-kp', kp.toFixed(1), col);
+  updatePRI();
 
   setNoaa('ok');
 }
@@ -1371,9 +1666,14 @@ async function fetchGeomag() {
   const guaRaw = extract(dGUA);
   const sjgRaw = extract(dSJG);
 
-  // Standard deviation of BOU as proxy for global EM activity
-  const mean = bouRaw.reduce((a, b) => a + b, 0) / bouRaw.length;
-  const sd   = Math.sqrt(bouRaw.reduce((a, b) => a + (b - mean) ** 2, 0) / bouRaw.length);
+  // Standard deviation per station (BOU = primary proxy for global EM activity)
+  const sdOf = arr => {
+    if (arr.length < 4) return 0;
+    const m = arr.reduce((a, b) => a + b, 0) / arr.length;
+    return Math.sqrt(arr.reduce((a, b) => a + (b - m) ** 2, 0) / arr.length);
+  };
+  const sd = sdOf(bouRaw);
+  APP.stationSd = { BOU: sd, GUA: sdOf(guaRaw), SJG: sdOf(sjgRaw) };
 
   document.getElementById('em-var').textContent = sd.toFixed(2);
 
@@ -1417,8 +1717,13 @@ async function fetchGeomag() {
   // Harmonic mode bars
   updateSchmBars(sd, emCol);
 
-  // Globe splat arcs
+  // Globe resonance node markers
   updateSchmGlobe(emLabel, emCol);
+
+  APP.emSd = sd;
+  setOv('ov-em', sd.toFixed(2), emCol);
+  setOv('ov-sr', emLabel, emCol);
+  updatePRI();
 
   setGeo('ok');
 }
@@ -1443,6 +1748,10 @@ async function fetchEarthquakes() {
   const now   = Date.now();
   const cnt24 = data.features.filter(f => now - f.properties.time < 86_400_000).length;
   document.getElementById('eq-cnt').textContent = cnt24;
+
+  APP.eq24 = cnt24;
+  setOv('ov-eq', cnt24, cnt24 >= 30 ? C.amber : C.teal);
+  updatePRI();
 
   // Render top-5 list
   const top5   = data.features.slice(0, 5);
@@ -1620,6 +1929,9 @@ async function fetchSWPCAlerts() {
     if (rDesc) rDesc.textContent = label(rLvl, 'R', today.R?.Text);
     if (sDesc) sDesc.textContent = label(sLvl, 'S', today.S?.Text);
 
+    const mxLvl = Math.max(gLvl, rLvl, sLvl);
+    setOv('ov-grs', `G${gLvl} R${rLvl} S${sLvl}`, mxLvl >= 3 ? C.red : mxLvl >= 1 ? C.amber : C.teal);
+
     // Show data timestamp from scales (not from alert)
     const ds = today.DateStamp ?? '';
     const ts = today.TimeStamp ?? '';
@@ -1704,6 +2016,11 @@ async function fetchParticleFlux() {
       peakEl.textContent = `PEAK ${peak < 1 ? peak.toFixed(2) : Math.round(peak)} pfu${sLvl ? ' · ' + sLvl : ''}`;
       peakEl.style.color = sLvl ? C.amber : 'var(--dim)';
     }
+    if (peak > 0) {
+      APP.pfPeak = peak;
+      setOv('ov-pf', peak < 1 ? peak.toFixed(2) : String(Math.round(peak)), peak >= 10 ? C.amber : C.teal);
+      updatePRI();
+    }
   }
 
   // ── Electron ≥2.0 MeV ─────────────────────────
@@ -1753,6 +2070,10 @@ async function fetchXRay() {
   clsEl.style.textShadow = `0 0 16px ${col}77`;
   fluxEl.textContent     = flux.toExponential(2);
   updateSubsolar(flux);
+
+  APP.flux = flux;
+  setOv('ov-xr', cls, col);
+  updatePRI();
 
   // Sparkline: last ~24 h at 1-min cadence → up to 1440 pts, sample every 10th
   const slice = longCh.slice(-1440);
@@ -1901,10 +2222,12 @@ let _solSelected= null;
 let _solMouseX  = -9999, _solMouseY = -9999;
 const _solPlanetPos = {};  // { abbr: { px, py, hR } }
 
-// Per-object visibility toggled by sol-controls chips
+// Per-object visibility toggled by sol-controls chips.
+// Everything starts HIDDEN — objects appear only after the user
+// activates them by clicking chips in the left-side panel.
 const _solVisible = {
-  SOL: true, Hg: true, V: true, E: true,
-  Ma: true,  J: true,  S: true, ORBITS: true,
+  SOL: false, Hg: false, V: false, E: false,
+  Ma: false,  J: false,  S: false, ORBITS: false,
 };
 
 function initSolarSystem() {
@@ -1959,6 +2282,7 @@ function initSolarSystem() {
     btn.style.color = def.col;
     btn.style.borderColor = def.col + '55';
     btn.dataset.solKey = def.key;
+    btn.classList.toggle('off', !_solVisible[def.key]);   // reflect hidden-by-default state
     btn.addEventListener('click', () => {
       _solVisible[def.key] = !_solVisible[def.key];
       btn.classList.toggle('off', !_solVisible[def.key]);
@@ -2410,6 +2734,7 @@ function boot() {
   initChips();
   initNasaKeyUI();
   initSolarSystem();
+  initOverviewNav();
   refreshAll();
 
   setInterval(refreshFast,  60_000);   // 60 s
